@@ -1,0 +1,54 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "estado": {
+      ".read": true,
+      "inicializado": {
+        ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor'"
+      }
+    },
+    "accesos": {
+      "$nomina": {
+        ".read": true,
+        ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor'",
+        ".validate": "newData.isString() && newData.val().length <= 40"
+      }
+    },
+    "usuarios": {
+      ".read": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor'",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor' || (!root.child('usuarios').exists() && auth != null && auth.uid === $uid && newData.child('rol').val() === 'supervisor')",
+        ".validate": "newData.hasChildren(['nomina', 'nombre', 'rol']) && (newData.child('rol').val() === 'vigilante' || newData.child('rol').val() === 'supervisor')",
+        "cambiar": {
+          ".write": "auth != null && auth.uid === $uid && newData.val() === false"
+        }
+      }
+    },
+    "puntos": {
+      ".read": "root.child('usuarios').child(auth.uid).child('rol').exists()",
+      ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor'"
+    },
+    "rutas": {
+      ".read": "root.child('usuarios').child(auth.uid).child('rol').exists()",
+      ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor'"
+    },
+    "config": {
+      ".read": "root.child('usuarios').child(auth.uid).child('rol').exists()",
+      ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor'"
+    },
+    "rondines": {
+      "$fecha": {
+        ".indexOn": [
+          "uid"
+        ],
+        ".read": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor' || (auth != null && query.orderByChild === 'uid' && query.equalTo === auth.uid)",
+        "$id": {
+          ".read": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor' || (auth != null && data.child('uid').val() === auth.uid)",
+          ".write": "root.child('usuarios').child(auth.uid).child('rol').val() === 'supervisor' || (root.child('usuarios').child(auth.uid).child('rol').exists() && ((!data.exists() && newData.child('uid').val() === auth.uid) || (data.child('uid').val() === auth.uid && data.child('estado').val() === 'en_curso')))"
+        }
+      }
+    }
+  }
+}
