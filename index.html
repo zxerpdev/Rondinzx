@@ -206,7 +206,15 @@ tr.clk:hover td{background:var(--azl)}
      (los datos viven solo en este navegador).
    - LOGO_SRC: ruta/URL del logotipo oficial Zubex (blanco sobre azul).
    ===================================================================== */
-const FIREBASE_CONFIG = { apiKey:'', authDomain:'', databaseURL:'', projectId:'', appId:'' };
+const FIREBASE_CONFIG = {
+  apiKey:'AIzaSyBJ6vGUbDISkLfLKXVqhheqVmDS2ICZKmM',
+  authDomain:'rondines-5d097.firebaseapp.com',
+  databaseURL:'https://rondines-5d097-default-rtdb.firebaseio.com',
+  projectId:'rondines-5d097',
+  storageBucket:'rondines-5d097.firebasestorage.app',
+  messagingSenderId:'688987494129',
+  appId:'1:688987494129:web:2a44548428f6c1d20b3b50'
+};
 const LOGO_SRC = '';
 
 /* ---------- Utilidades ---------- */
@@ -289,16 +297,19 @@ async function seed() {
     R3:{ ...base, id:'R3', nombre:'Ronda general noche', turno:'Noche', horarios:'00:00,03:00', durMin:60, durMax:75, puntos:seq(1, 32) },
     R4:{ ...base, id:'R4', nombre:'Ronda perimetral día', turno:'Día', horarios:'09:00,11:00,15:00', dias:'1,2,3,4,5,6', durMin:12, durMax:15, intervalo:1.5, puntos:seq(22, 29) }
   };
-  const usuarios = {
-    '9999':{ nomina:'9999', nombre:'Supervisor demo', rol:'supervisor', pin:await hashPin('1234') },
-    '1001':{ nomina:'1001', nombre:'Vigilante demo', rol:'vigilante', pin:await hashPin('1234') }
-  };
-  await DB.set('/puntos', puntos); await DB.set('/rutas', rutas); await DB.set('/usuarios', usuarios);
+  await DB.set('/puntos', puntos); await DB.set('/rutas', rutas);
+  if (DB.mode === 'local') {
+    await DB.set('/usuarios', {
+      '9999':{ nomina:'9999', nombre:'Supervisor demo', rol:'supervisor', pin:await hashPin('1234') },
+      '1001':{ nomina:'1001', nombre:'Vigilante demo', rol:'vigilante', pin:await hashPin('1234') }
+    });
+  }
 }
 async function loadBase() {
   let [p, r, u, c] = await Promise.all([DB.get('/puntos'), DB.get('/rutas'), DB.get('/usuarios'), DB.get('/config')]);
   if (!p) { await seed(); [p, r, u, c] = await Promise.all([DB.get('/puntos'), DB.get('/rutas'), DB.get('/usuarios'), DB.get('/config')]); }
   S.puntos = p || {}; S.rutas = r || {}; S.usuarios = u || {}; S.cfg = c || {};
+  S.setup = DB.mode === 'firebase' && !Object.keys(S.usuarios).length;
   try { await seedPos(); } catch (e) {}
 }
 const baseUrl = () => (S.cfg.baseUrl || location.href.split(/[?#]/)[0]).trim();
@@ -347,6 +358,27 @@ const hoy = () => dstr();
 function nextPending(ron) { return arr(ron.esperados).find(p => !(ron.lecturas || {})[p]); }
 
 /* ---------- Sesión ---------- */
+// Reglas de PIN: solo dígitos, 6 o más (8 o más para supervisores), sin dígito repetido ni secuencias
+function pinInvalido(pin, nomina, rol) {
+  const min = rol === 'supervisor' ? 8 : 6;
+  if (!/^\d+$/.test(pin)) return 'El PIN solo puede llevar números';
+  if (pin.length < min) return `El PIN debe tener al menos ${min} dígitos`;
+  if (/^(\d)\1+$/.test(pin)) return 'El PIN no puede ser un mismo dígito repetido';
+  if ('01234567890123456789'.includes(pin) || '98765432109876543210'.includes(pin)) return 'El PIN no puede ser una secuencia (123456…)';
+  if (pin === nomina) return 'El PIN no puede ser igual a la nómina';
+  return null;
+}
+async function doSetup() {
+  const n = $('#su').value.trim(), nm = $('#sn').value.trim(), p1 = $('#sp').value.trim(), p2 = $('#sq').value.trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(n) || !nm) { toast('Revisa la nómina (letras o números) y el nombre', 'bad'); return; }
+  const err = pinInvalido(p1, n, 'supervisor'); if (err) { toast(err, 'bad'); return; }
+  if (p1 !== p2) { toast('Los PIN no coinciden', 'bad'); return; }
+  const cur = await DB.get('/usuarios');
+  if (cur && Object.keys(cur).length) { S.setup = false; await loadBase(); render(); toast('Ya existe un supervisor. Inicia sesión.'); return; }
+  const u = { nomina:n, nombre:nm, rol:'supervisor', pin:await hashPin(p1) };
+  await DB.set('/usuarios/' + n, u); S.usuarios[n] = u; S.setup = false; S.user = u; localStorage.setItem('rz_ses', n);
+  loadActive(); enterApp();
+}
 async function doLogin(nom, pin) {
   const u = S.usuarios[nom.trim()];
   if (!u || u.pin !== await hashPin(pin)) { toast('Nómina o PIN incorrectos', 'bad'); return; }
@@ -400,8 +432,8 @@ function startRondin(rutaId) {
 }
 function handleScan(pid, k, manual = false, motivo = '') {
   const p = S.puntos[pid];
-  if (!p) { toast('Etiqueta desconocida', 'bad'); return; }
-  if (!manual && p.token !== k) { toast('Etiqueta no válida', 'bad'); return; }
+  if (!p) { toast(`Etiqueta no válida: el punto ${pid} no existe en esta plataforma`, 'bad'); return; }
+  if (!manual && p.token !== k) { toast(`Etiqueta no válida: la clave de ${pid} no coincide. Vuelve a grabarla con la URL actual`, 'bad'); return; }
   if (!S.user) { S.pending = { pid, k }; return; }
   if (!S.active) { S.pending = { pid, k }; S.view = 'punto'; render(); return; }
   const ron = S.active; ron.lecturas = ron.lecturas || {};
@@ -455,6 +487,15 @@ async function startNfc() {
 
 /* ---------- Vistas del vigilante ---------- */
 function vLogin() {
+  if (S.setup) return `${topBar('Configuración inicial')}<div class="wrap narrow">
+    <h1>Crea el supervisor inicial</h1><p class="mu sm" style="margin-top:4px">Todavía no hay usuarios. Este será el primer acceso, con permisos de supervisor. Después podrás dar de alta a los vigilantes en Configuración → Usuarios.</p>
+    <form id="fSetup" autocomplete="off">
+      <label for="su">Número de nómina</label><input id="su" inputmode="numeric" required>
+      <label for="sn">Nombre</label><input id="sn" autocomplete="name" required>
+      <label for="sp">PIN (8 dígitos o más)</label><input id="sp" type="password" inputmode="numeric" autocomplete="new-password" required>
+      <label for="sq">Repite el PIN</label><input id="sq" type="password" inputmode="numeric" autocomplete="new-password" required>
+      <button class="btn block mt" type="submit">Crear y entrar</button>
+    </form></div>`;
   return `${topBar('Rondines de vigilancia')}<div class="wrap narrow">
     ${DB.mode === 'local' ? '<div class="banner">Modo de prueba local: los datos solo viven en este navegador. Configura Firebase para compartirlos.</div>' : ''}
     <h1>Inicia sesión</h1><p class="mu sm" style="margin-top:4px">Usa tu número de nómina y tu PIN.</p>
@@ -505,7 +546,7 @@ function vPunto() {
   const ron = S.active;
   if (ron && S.sheet) return `${topBar('Punto escaneado', '<button class="btn sec" data-act="verRondin">Ver rondín</button>')}${sheetHtml(true)}`;
   const pd = S.pending, p = pd && S.puntos[pd.pid];
-  if (!p || p.token !== pd.k) return `${topBar('Punto escaneado')}<div class="wrap"><div class="card"><h2>Etiqueta no válida</h2><p class="mu sm" style="margin-top:6px">No se reconoce esta etiqueta. Avisa a tu supervisor.</p><button class="btn block mt" data-act="sinRegistrar">Ir al inicio</button></div></div>`;
+  if (!p || p.token !== pd.k) return `${topBar('Punto escaneado')}<div class="wrap"><div class="card"><h2>Etiqueta no válida</h2><p class="mu sm" style="margin-top:6px">${!pd ? 'No se leyó ninguna etiqueta.' : !p ? `La etiqueta apunta al punto <b>${esc(pd.pid)}</b>, que no existe en esta plataforma.` : `La etiqueta es del punto <b>${esc(p.nombre)}</b> (${esc(p.id)}), pero su clave no coincide con la registrada${pd.k ? '' : ' (la URL no trae clave)'}.`} Avisa a tu supervisor: hay que volver a grabar la etiqueta con la URL actual de Configuración → Puntos y etiquetas.</p><button class="btn block mt" data-act="sinRegistrar">Ir al inicio</button></div></div>`;
   const rs = Object.values(S.rutas).filter(r => arr(r.puntos).includes(p.id)).sort((a, b) => (tocaAhora(b) - tocaAhora(a)) || a.nombre.localeCompare(b.nombre));
   return `${topBar('Punto escaneado', '<button class="btn sec" data-act="logout">Salir</button>')}<div class="wrap">
     <div class="card"><div class="okmark" style="background:var(--az)">${NFCSVG}</div><h1>${esc(p.nombre)}</h1><p class="mu sm" style="margin-top:4px">Etiqueta ${p.id} leída. No tienes un rondín en curso.</p></div>
@@ -684,7 +725,7 @@ function cUsuarios() {
   const us = Object.values(S.usuarios).sort((a, b) => a.nomina.localeCompare(b.nomina, 'es', { numeric:true }));
   return `<div class="card" style="margin-bottom:12px"><h2>Agregar usuario</h2><div class="two"><div><label>Nómina</label><input id="un" inputmode="numeric"></div><div><label>Nombre</label><input id="uname"></div><div><label>PIN</label><input id="up" type="password" inputmode="numeric"></div><div><label>Rol</label><select id="ur"><option value="vigilante">Vigilante</option><option value="supervisor">Supervisor</option></select></div></div><button class="btn mt" data-act="uAdd">Agregar</button></div>
     <div class="tw"><table><thead><tr><th>Nómina</th><th>Nombre</th><th>Rol</th><th></th></tr></thead><tbody>${us.map(u => `<tr><td>${esc(u.nomina)}</td><td>${esc(u.nombre)}</td><td>${u.rol === 'supervisor' ? 'Supervisor' : 'Vigilante'}</td><td style="white-space:nowrap"><button class="btn sm sec" data-act="uPin" data-id="${esc(u.nomina)}">Cambiar PIN</button> ${u.nomina === S.user.nomina ? '' : `<button class="btn sm sec" data-act="uDel" data-id="${esc(u.nomina)}">Eliminar</button>`}</td></tr>`).join('')}</tbody></table></div>
-    <p class="note">Los usuarios de demostración (nóminas 9999 y 1001, PIN 1234) deben cambiarse o eliminarse antes de usar la plataforma en planta.</p>`;
+    ${DB.mode === 'local' ? '<p class="note">Los usuarios de demostración (nóminas 9999 y 1001, PIN 1234) existen solo en este modo de prueba local.</p>' : '<p class="note">PIN: solo números, 6 dígitos o más (8 o más para supervisores).</p>'}`;
 }
 function vSup() {
   const tabs = [['monitor', 'Monitor'], ['resumen', 'Resumen'], ['rondines', 'Rondines'], ['hallazgos', 'Hallazgos'], ['config', 'Configuración']];
@@ -1054,7 +1095,11 @@ function render() {
   if (S.qr) { const qv = $('#qrv'); if (qv && QRS.stream && !qv.srcObject) { qv.srcObject = QRS.stream; qv.play().catch(() => {}); } }
   const want = S.view === 'sup' && S.tab === 'monitor';
   if (want && !S.unwatch) startWatch(); else if (!want && S.unwatch) stopWatch();
-  if (S.view === 'login') $('#fLogin').addEventListener('submit', e => { e.preventDefault(); doLogin($('#lu').value, $('#lp').value); });
+  if (S.view === 'login') {
+    const fl = $('#fLogin'), fs = $('#fSetup');
+    if (fl) fl.addEventListener('submit', e => { e.preventDefault(); doLogin($('#lu').value, $('#lp').value); });
+    if (fs) fs.addEventListener('submit', e => { e.preventDefault(); doSetup(); });
+  }
 }
 setInterval(() => { const c = $('#crono'); if (c && S.active) c.textContent = dur(Date.now() - S.active.inicio); }, 1000);
 
@@ -1213,14 +1258,16 @@ const ACT = {
   /* usuarios */
   async uAdd() {
     const n = $('#un').value.trim(), nm = $('#uname').value.trim(), pin = $('#up').value.trim();
-    if (!/^[A-Za-z0-9_-]+$/.test(n) || !nm || pin.length < 4) { toast('Revisa nómina (letras o números), nombre y PIN de 4+ dígitos', 'bad'); return; }
+    if (!/^[A-Za-z0-9_-]+$/.test(n) || !nm) { toast('Revisa la nómina (letras o números) y el nombre', 'bad'); return; }
+    const perr = pinInvalido(pin, n, $('#ur').value); if (perr) { toast(perr, 'bad'); return; }
     if (S.usuarios[n]) { toast('Esa nómina ya existe', 'bad'); return; }
     const u = { nomina:n, nombre:nm, rol:$('#ur').value, pin:await hashPin(pin) }; S.usuarios[n] = u; await DB.set('/usuarios/' + n, u); render(); toast('Usuario agregado');
   },
   async uPin(t) {
-    const pin = await askText('Nuevo PIN (mínimo 4 dígitos)', 'PIN', 'Guardar', true); if (!pin) return;
-    if (pin.length < 4) { toast('El PIN debe tener al menos 4 dígitos', 'bad'); return; }
-    const u = S.usuarios[t.dataset.id]; u.pin = await hashPin(pin); await DB.set(`/usuarios/${u.nomina}/pin`, u.pin); toast('PIN actualizado');
+    const u = S.usuarios[t.dataset.id]; if (!u) return;
+    const pin = await askText('Nuevo PIN (6 dígitos o más; 8 para supervisores)', 'PIN', 'Guardar', true); if (!pin) return;
+    const perr = pinInvalido(pin, u.nomina, u.rol); if (perr) { toast(perr, 'bad'); return; }
+    u.pin = await hashPin(pin); await DB.set(`/usuarios/${u.nomina}/pin`, u.pin); toast('PIN actualizado');
   },
   async uDel(t) {
     if (!await confirmBox(`¿Eliminar al usuario ${t.dataset.id}?`, 'Eliminar', true)) return;
