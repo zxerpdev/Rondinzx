@@ -193,6 +193,7 @@ tr.clk:hover td{background:var(--azl)}
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -216,6 +217,10 @@ const FIREBASE_CONFIG = {
   appId:'1:688987494129:web:2a44548428f6c1d20b3b50'
 };
 const LOGO_SRC = '';
+/* Dominio ficticio con el que se arma el correo interno de cada usuario (nómina@dominio). No se envían correos. */
+const MAIL_DOMAIN = 'rondines.zubex.com.mx';
+/* Firebase exige 6+ caracteres: se completa la clave con un sufijo fijo (no es secreto, solo relleno). */
+const fbPass = p => p + '#Zx7';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -235,10 +240,22 @@ const DIAS = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
 const NFC = 'NDEFReader' in window;
 const NFCSVG = '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 8.5a5.5 5.5 0 0 1 0 7"/><path d="M10 6a9 9 0 0 1 0 12"/><path d="M14 3.5a12.5 12.5 0 0 1 0 17"/></svg>';
 
-async function hashPin(p) {
+async function legacyHash(p) {
   const t = 'zx-rondines|' + p;
   try { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join(''); }
   catch (e) { let h = 5381; for (const c of t) h = ((h << 5) + h + c.charCodeAt(0)) >>> 0; return 'x' + h; }
+}
+const toHex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+async function pbkdf2(pin, saltHex) {
+  if (!(window.crypto && crypto.subtle)) throw new Error('Se requiere una conexión https para proteger el PIN');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const salt = Uint8Array.from(saltHex.match(/../g).map(x => parseInt(x, 16)));
+  return toHex(await crypto.subtle.deriveBits({ name:'PBKDF2', salt, iterations:150000, hash:'SHA-256' }, key, 256));
+}
+async function hashPin(pin) { const s = toHex(crypto.getRandomValues(new Uint8Array(16))); return 'p1$' + s + '$' + await pbkdf2(pin, s); }
+async function checkPin(stored, pin) {
+  if (String(stored).startsWith('p1$')) { const [, s, hh] = stored.split('$'); return (await pbkdf2(pin, s)) === hh; }
+  return stored === await legacyHash(pin);
 }
 
 /* ---------- Base de datos: Firebase RTDB o modo local ---------- */
@@ -252,6 +269,7 @@ const DB = (() => {
       set: (p, v) => db.ref(p).set(clean(v)),
       update: (p, v) => db.ref(p).update(clean(v)),
       remove: p => db.ref(p).remove(),
+      getMine: (p, uid) => db.ref(p).orderByChild('uid').equalTo(uid).once('value').then(s => s.val()),
       watch: (p, cb) => { const r = db.ref(p), f = s => cb(s.val()); r.on('value', f); return () => r.off('value', f); }
     };
   }
@@ -272,9 +290,12 @@ const DB = (() => {
     set: async (p, v) => { load(); setp(p, clean(v)); save(); },
     update: async (p, v) => { load(); Object.keys(v).forEach(k => setp(p + '/' + k, clean(v[k]))); save(); },
     remove: async p => { load(); setp(p, null); save(); },
+    getMine: async p => { load(); return clean(getp(p)); },
     watch: (p, cb) => { let last = ''; const run = () => { load(); const v = clean(getp(p)), s = JSON.stringify(v); if (s !== last) { last = s; cb(v); } }; run(); const i = setInterval(run, 2500); return () => clearInterval(i); }
   };
 })();
+
+const AUTH = DB.mode === 'firebase' ? firebase.auth() : null;
 
 /* ---------- Estado ---------- */
 const S = { view:'loading', user:null, puntos:{}, rutas:{}, usuarios:{}, cfg:{}, active:null, pending:null, sheet:null,
@@ -306,10 +327,16 @@ async function seed() {
   }
 }
 async function loadBase() {
-  let [p, r, u, c] = await Promise.all([DB.get('/puntos'), DB.get('/rutas'), DB.get('/usuarios'), DB.get('/config')]);
-  if (!p) { await seed(); [p, r, u, c] = await Promise.all([DB.get('/puntos'), DB.get('/rutas'), DB.get('/usuarios'), DB.get('/config')]); }
-  S.puntos = p || {}; S.rutas = r || {}; S.usuarios = u || {}; S.cfg = c || {};
-  S.setup = DB.mode === 'firebase' && !Object.keys(S.usuarios).length;
+  const sup = !!(S.user && S.user.rol === 'supervisor');
+  const getAll = () => Promise.all([DB.get('/puntos'), DB.get('/rutas'), (DB.mode === 'local' || sup) ? DB.get('/usuarios') : Promise.resolve(null), DB.get('/config')]);
+  let [p, r, u, c] = await getAll();
+  if (!p) {
+    if (DB.mode === 'firebase' && !sup) throw new Error('La plataforma aún no está configurada. Pide a un supervisor que entre primero.');
+    await seed(); [p, r, u, c] = await getAll();
+  }
+  S.puntos = p || {}; S.rutas = r || {}; S.cfg = c || {};
+  if (DB.mode === 'local') S.usuarios = u || {};
+  else { S.usuarios = {}; Object.entries(u || {}).forEach(([uid, x]) => { S.usuarios[x.nomina] = { ...x, uid }; }); }
   try { await seedPos(); } catch (e) {}
 }
 const baseUrl = () => (S.cfg.baseUrl || location.href.split(/[?#]/)[0]).trim();
@@ -368,11 +395,85 @@ function pinInvalido(pin, nomina, rol) {
   if (pin === nomina) return 'El PIN no puede ser igual a la nómina';
   return null;
 }
+const authErr = e => { const c = (e && e.code) || ''; return c === 'auth/too-many-requests' ? 'Demasiados intentos. Espera unos minutos e inténtalo de nuevo' : c === 'auth/network-request-failed' ? 'Sin conexión. Revisa tu internet' : 'Nómina o PIN incorrectos'; };
+async function afterAuth(u) {
+  const perfil = await DB.get('/usuarios/' + u.uid);
+  if (!perfil) { await AUTH.signOut(); S.user = null; S.view = 'login'; render(); toast('Tu usuario no tiene permisos. Avisa a tu supervisor.', 'bad'); return; }
+  S.user = { ...perfil, uid:u.uid };
+  try { await loadBase(); } catch (e) { await AUTH.signOut(); S.user = null; S.view = 'login'; render(); toast(e.message || 'No se pudo cargar la plataforma', 'bad'); return; }
+  if (S.user.cambiar) { S.view = 'cambiar'; render(); return; }
+  S.lastPin = null; loadActive(); enterApp();
+}
+function claveInvalida(c, nomina, rol, actual) {
+  const min = rol === 'supervisor' ? 8 : 6;
+  if (c.length < min) return `La contraseña nueva debe tener al menos ${min} caracteres`;
+  if (c === actual) return 'La contraseña nueva debe ser distinta de la actual';
+  if (/^(.)\1+$/.test(c)) return 'No puede ser un mismo carácter repetido';
+  if ('01234567890123456789'.includes(c) || '98765432109876543210'.includes(c)) return 'No puede ser una secuencia (123456…)';
+  if (c === nomina) return 'No puede ser igual a la nómina';
+  return null;
+}
+async function doCambiar() {
+  const actual = S.lastPin || ($('#cp0') ? $('#cp0').value : ''), n1 = $('#cp1').value, n2 = $('#cp2').value;
+  const err = claveInvalida(n1, S.user.nomina, S.user.rol, actual); if (err) { toast(err, 'bad'); return; }
+  if (n1 !== n2) { toast('La contraseña nueva no coincide', 'bad'); return; }
+  try {
+    const u = AUTH.currentUser;
+    await u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email, fbPass(actual)));
+    await u.updatePassword(fbPass(n1));
+    await DB.set('/usuarios/' + S.user.uid + '/cambiar', false);
+  } catch (e) { toast(authErr(e), 'bad'); return; }
+  S.user.cambiar = false; S.lastPin = null; toast('Contraseña actualizada'); loadActive(); enterApp();
+}
+function vCambiar() {
+  const min = S.user.rol === 'supervisor' ? 8 : 6;
+  return `${topBar('Primer acceso', '<button class="btn sec" data-act="logout">Salir</button>')}<div class="wrap narrow">
+    <h1>Elige tu contraseña</h1><p class="mu sm" style="margin-top:4px">Es tu primer acceso. Cambia la contraseña inicial por una que solo tú conozcas (mínimo ${min} caracteres).</p>
+    <form id="fCambiar" autocomplete="off">
+      ${S.lastPin ? '' : '<label for="cp0">Contraseña actual</label><input id="cp0" type="password" autocomplete="current-password" autocapitalize="off" required>'}
+      <label for="cp1">Contraseña nueva</label><input id="cp1" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <label for="cp2">Repite la contraseña nueva</label><input id="cp2" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <button class="btn block mt" type="submit">Guardar y entrar</button>
+    </form></div>`;
+}
+async function createAuthUser(alias, clave) {
+  const app = firebase.apps.find(a => a.name === 'sec') || firebase.initializeApp(FIREBASE_CONFIG, 'sec');
+  const a = app.auth(), c = await a.createUserWithEmailAndPassword(`${alias}@${MAIL_DOMAIN}`, fbPass(clave)), uid = c.user.uid;
+  await a.signOut(); return uid;
+}
+async function crearAcceso(n, clave, v0) {
+  for (let v = v0; v < v0 + 9; v++) {
+    const alias = v === 1 ? n : `${n}.${v}`;
+    try { return { uid:await createAuthUser(alias, clave), alias, v }; } catch (e) { if (!e || e.code !== 'auth/email-already-in-use') throw e; }
+  }
+  throw new Error('No se pudo crear el acceso');
+}
+async function resetPin(n) {
+  const u = S.usuarios[n]; if (!u) return;
+  if (u.nomina === S.user.nomina) { toast('Para tu propio PIN usa «Mi PIN»'); return; }
+  const pin = await askText(`Nuevo PIN para ${u.nombre} (6 dígitos o más; 8 para supervisores)`, 'PIN', 'Guardar', true); if (!pin) return;
+  const perr = pinInvalido(pin, u.nomina, u.rol); if (perr) { toast(perr, 'bad'); return; }
+  try {
+    const ac = await crearAcceso(u.nomina, pin, (u.v || 1) + 1), perfil = { nomina:u.nomina, nombre:u.nombre, rol:u.rol, alias:ac.alias, v:ac.v, cambiar:true };
+    await DB.update('/', { ['usuarios/' + ac.uid]:perfil, ['usuarios/' + u.uid]:null, ['accesos/' + u.nomina]:ac.alias });
+    S.usuarios[u.nomina] = { ...perfil, uid:ac.uid }; render(); toast('PIN restablecido');
+  } catch (e) { toast('No se pudo restablecer: ' + (e.message || e), 'bad'); }
+}
 async function doSetup() {
   const n = $('#su').value.trim(), nm = $('#sn').value.trim(), p1 = $('#sp').value.trim(), p2 = $('#sq').value.trim();
   if (!/^[A-Za-z0-9_-]+$/.test(n) || !nm) { toast('Revisa la nómina (letras o números) y el nombre', 'bad'); return; }
   const err = pinInvalido(p1, n, 'supervisor'); if (err) { toast(err, 'bad'); return; }
   if (p1 !== p2) { toast('Los PIN no coinciden', 'bad'); return; }
+  if (DB.mode === 'firebase') {
+    try {
+      if (await DB.get('/estado/inicializado')) { S.setup = false; render(); toast('Ya existe un supervisor. Inicia sesión.'); return; }
+      const c = await AUTH.createUserWithEmailAndPassword(`${n}@${MAIL_DOMAIN}`, fbPass(p1));
+      await DB.set('/usuarios/' + c.user.uid, { nomina:n, nombre:nm, rol:'supervisor', alias:n, v:1 });
+      await DB.set('/accesos/' + n, n); await DB.set('/estado/inicializado', true);
+      S.setup = false; await afterAuth(c.user);
+    } catch (e) { toast('No se pudo crear el supervisor: ' + (e.message || e), 'bad'); }
+    return;
+  }
   const cur = await DB.get('/usuarios');
   if (cur && Object.keys(cur).length) { S.setup = false; await loadBase(); render(); toast('Ya existe un supervisor. Inicia sesión.'); return; }
   const u = { nomina:n, nombre:nm, rol:'supervisor', pin:await hashPin(p1) };
@@ -380,8 +481,19 @@ async function doSetup() {
   loadActive(); enterApp();
 }
 async function doLogin(nom, pin) {
+  if (DB.mode === 'firebase') {
+    nom = nom.trim();
+    if (!/^[A-Za-z0-9_-]+$/.test(nom)) { toast('Nómina o PIN incorrectos', 'bad'); return; }
+    try {
+      const alias = await DB.get('/accesos/' + nom);
+      if (!alias) { toast('Nómina o PIN incorrectos', 'bad'); return; }
+      await AUTH.signInWithEmailAndPassword(`${alias}@${MAIL_DOMAIN}`, fbPass(pin));
+      S.lastPin = pin; await afterAuth(AUTH.currentUser);
+    } catch (e) { toast(authErr(e), 'bad'); }
+    return;
+  }
   const u = S.usuarios[nom.trim()];
-  if (!u || u.pin !== await hashPin(pin)) { toast('Nómina o PIN incorrectos', 'bad'); return; }
+  if (!u || !(await checkPin(u.pin, pin))) { toast('Nómina o PIN incorrectos', 'bad'); return; }
   S.user = u; localStorage.setItem('rz_ses', u.nomina);
   loadActive(); enterApp();
 }
@@ -425,9 +537,9 @@ function startRondin(rutaId) {
   const r = S.rutas[rutaId]; if (!r) return;
   const esp = arr(r.puntos).filter(p => S.puntos[p]);
   const nombres = {}; Object.values(S.puntos).forEach(p => nombres[p.id] = p.nombre);
-  S.active = { id:uid(), rutaId, rutaNombre:r.nombre, nomina:S.user.nomina, nombre:S.user.nombre, fecha:dstr(), inicio:Date.now(),
+  S.active = { id:uid(), rutaId, rutaNombre:r.nombre, nomina:S.user.nomina, uid:S.user.uid || S.user.nomina, nombre:S.user.nombre, fecha:dstr(), inicio:Date.now(),
     estado:'en_curso', esperados:esp, nombres, orden:r.orden || 'avisar', durMin:r.durMin || 0, durMax:r.durMax || 0, intervalo:r.intervalo || 0, lecturas:{} };
-  saveActive(); syncActive(); const pend = S.pending; S.pending = null; S.view = pend ? 'punto' : 'round'; render(); wake();
+  saveActive(); DB.set(rpath(S.active), S.active).catch(() => {}); const pend = S.pending; S.pending = null; S.view = pend ? 'punto' : 'round'; render(); wake();
   if (pend) handleScan(pend.pid, pend.k);
 }
 function handleScan(pid, k, manual = false, motivo = '') {
@@ -501,7 +613,7 @@ function vLogin() {
     <h1>Inicia sesión</h1><p class="mu sm" style="margin-top:4px">Usa tu número de nómina y tu PIN.</p>
     <form id="fLogin" autocomplete="on">
       <label for="lu">Número de nómina</label><input id="lu" inputmode="numeric" autocomplete="username" required>
-      <label for="lp">PIN</label><input id="lp" type="password" inputmode="numeric" autocomplete="current-password" required>
+      <label for="lp">PIN o contraseña</label><input id="lp" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
       <button class="btn block mt" type="submit">Entrar</button>
     </form></div>`;
 }
@@ -514,7 +626,7 @@ function vHome() {
   const rs = Object.values(S.rutas).sort((a, b) => (tocaAhora(b) - tocaAhora(a)) || a.nombre.localeCompare(b.nombre));
   const sup = S.user.rol === 'supervisor';
   const ron = S.active;
-  return `${topBar('Hola, ' + S.user.nombre.split(' ')[0], `${sup ? '<button class="btn sec" data-act="toSup">Supervisión</button>' : ''}<button class="btn sec" data-act="hist">Historial</button><button class="btn sec" data-act="logout">Salir</button>`)}
+  return `${topBar('Hola, ' + S.user.nombre.split(' ')[0], `${sup ? '<button class="btn sec" data-act="toSup">Supervisión</button>' : ''}<button class="btn sec" data-act="hist">Historial</button>${DB.mode === 'firebase' ? '<button class="btn sec" data-act="miPin">Mi PIN</button>' : ''}<button class="btn sec" data-act="logout">Salir</button>`)}
   <div class="wrap">
     ${S.pending ? `<div class="banner">Escaneaste «${esc((S.puntos[S.pending.pid] || {}).nombre || S.pending.pid)}». Inicia un rondín para registrarlo.</div>` : ''}
     ${ron ? `<div class="card rcard" style="border:2px solid var(--az)"><h2>Rondín en curso</h2><p class="mu sm">${esc(ron.rutaNombre)} · inició ${hhmm(ron.inicio)}</p><button class="btn block" data-act="resume">Continuar rondín</button></div><div style="height:12px"></div>` : ''}
@@ -613,7 +725,8 @@ function detailHtml(r) {
 /* ---------- Carga de rondines por rango ---------- */
 async function loadRange(a, b, force) {
   const t = dstr(), ds = daysBetween(a, b).filter(d => force || d === t || !S.rond[d]);
-  await Promise.all(ds.map(async d => { S.rond[d] = (await DB.get('/rondines/' + d)) || {}; }));
+  const dia = d => (DB.mode === 'firebase' && S.user && S.user.rol !== 'supervisor') ? DB.getMine('/rondines/' + d, S.user.uid) : DB.get('/rondines/' + d);
+  await Promise.all(ds.map(async d => { S.rond[d] = (await dia(d)) || {}; }));
 }
 const inRange = (a, b) => daysBetween(a, b).flatMap(d => Object.values(S.rond[d] || {}));
 async function supLoad(force) {
@@ -723,13 +836,14 @@ function cRutas() {
 }
 function cUsuarios() {
   const us = Object.values(S.usuarios).sort((a, b) => a.nomina.localeCompare(b.nomina, 'es', { numeric:true }));
-  return `<div class="card" style="margin-bottom:12px"><h2>Agregar usuario</h2><div class="two"><div><label>Nómina</label><input id="un" inputmode="numeric"></div><div><label>Nombre</label><input id="uname"></div><div><label>PIN</label><input id="up" type="password" inputmode="numeric"></div><div><label>Rol</label><select id="ur"><option value="vigilante">Vigilante</option><option value="supervisor">Supervisor</option></select></div></div><button class="btn mt" data-act="uAdd">Agregar</button></div>
-    <div class="tw"><table><thead><tr><th>Nómina</th><th>Nombre</th><th>Rol</th><th></th></tr></thead><tbody>${us.map(u => `<tr><td>${esc(u.nomina)}</td><td>${esc(u.nombre)}</td><td>${u.rol === 'supervisor' ? 'Supervisor' : 'Vigilante'}</td><td style="white-space:nowrap"><button class="btn sm sec" data-act="uPin" data-id="${esc(u.nomina)}">Cambiar PIN</button> ${u.nomina === S.user.nomina ? '' : `<button class="btn sm sec" data-act="uDel" data-id="${esc(u.nomina)}">Eliminar</button>`}</td></tr>`).join('')}</tbody></table></div>
-    ${DB.mode === 'local' ? '<p class="note">Los usuarios de demostración (nóminas 9999 y 1001, PIN 1234) existen solo en este modo de prueba local.</p>' : '<p class="note">PIN: solo números, 6 dígitos o más (8 o más para supervisores).</p>'}`;
+  return `<div class="card" style="margin-bottom:12px"><div class="row between" style="align-items:flex-start;gap:12px"><div><h2>Importar listado</h2><p class="sm mu" style="margin-top:4px">Sube un Excel o CSV con la nómina en la primera columna y el nombre en la segunda. Las demás columnas, incluida cualquier contraseña, se ignoran: cada vigilante recibe un PIN nuevo de 6 dígitos.</p></div><button class="btn sm" data-act="uImport" style="flex:none">Importar</button></div><input type="file" id="uFile" accept=".xlsx,.xls,.csv" hidden></div>
+    <div class="card" style="margin-bottom:12px"><h2>Agregar usuario</h2><div class="two"><div><label>Nómina</label><input id="un" inputmode="numeric"></div><div><label>Nombre</label><input id="uname"></div><div><label>PIN</label><input id="up" type="password" inputmode="numeric"></div><div><label>Rol</label><select id="ur"><option value="vigilante">Vigilante</option><option value="supervisor">Supervisor</option></select></div></div><button class="btn mt" data-act="uAdd">Agregar</button></div>
+    <div class="tw"><table><thead><tr><th>Nómina</th><th>Nombre</th><th>Rol</th><th></th></tr></thead><tbody>${us.map(u => `<tr><td>${esc(u.nomina)}</td><td>${esc(u.nombre)}</td><td>${u.rol === 'supervisor' ? 'Supervisor' : 'Vigilante'}${u.cambiar ? ' <span class="chip">cambio pendiente</span>' : ''}</td><td style="white-space:nowrap"><button class="btn sm sec" data-act="uPin" data-id="${esc(u.nomina)}">Cambiar PIN</button> ${u.nomina === S.user.nomina ? '' : `<button class="btn sm sec" data-act="uDel" data-id="${esc(u.nomina)}">Eliminar</button>`}</td></tr>`).join('')}</tbody></table></div>
+    ${DB.mode === 'local' ? '<p class="note">Los usuarios de demostración (nóminas 9999 y 1001, PIN 1234) existen solo en este modo de prueba local.</p>' : '<p class="note">Altas manuales: PIN solo con números, 6 dígitos o más (8 o más para supervisores). Las contraseñas se guardan cifradas en Firebase Authentication, no en la base de datos.</p>'}`;
 }
 function vSup() {
   const tabs = [['monitor', 'Monitor'], ['resumen', 'Resumen'], ['rondines', 'Rondines'], ['hallazgos', 'Hallazgos'], ['config', 'Configuración']];
-  return `${topBar('Supervisión de rondines', '<button class="btn sec" data-act="toGuard">Hacer un rondín</button><button class="btn sec" data-act="logout">Salir</button>')}
+  return `${topBar('Supervisión de rondines', '<button class="btn sec" data-act="toGuard">Hacer un rondín</button>' + (DB.mode === 'firebase' ? '<button class="btn sec" data-act="miPin">Mi PIN</button>' : '') + '<button class="btn sec" data-act="logout">Salir</button>')}
     <nav class="tabs">${tabs.map(([k, v]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-k="${k}">${v}</button>`).join('')}</nav>
     <main class="wrap wide">${S.tab === 'monitor' ? tMonitor() : S.tab === 'resumen' ? tResumen() : S.tab === 'rondines' ? tRondines() : S.tab === 'hallazgos' ? tHallazgos() : tConfig()}
     <div class="foot">Generado: ${new Date().toLocaleString('es-MX')}</div></main>`;
@@ -759,6 +873,7 @@ const legendHtml = () => `<span class="lg"><i class="lgd" style="background:#0D1
 
 async function seedPos() {
   if (S.cfg.posSeeded) return;
+  if (DB.mode === 'firebase' && !(S.user && S.user.rol === 'supervisor')) return;
   for (const [id, pos] of Object.entries(SEED_POS)) { if (S.puntos[id] && !S.puntos[id].pos) { S.puntos[id].pos = pos; await DB.set(`/puntos/${id}/pos`, pos); } }
   S.cfg.posSeeded = true; await DB.set('/config/posSeeded', true);
 }
@@ -1060,6 +1175,82 @@ function qrFound(txt) {
   qrStop(); S.qr = false; handleScan(t.pid, t.k);
 }
 
+/* ---------- Importar listado de usuarios ---------- */
+function genPin(n) { for (;;) { const p = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000)); if (!pinInvalido(p, n, 'vigilante')) return p; } }
+async function leerListado(file) {
+  const wb = XLSX.read(await file.arrayBuffer(), { type:'array' });
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' }), out = [], vistos = new Set();
+  rows.forEach(r => {
+    const n = String(r[0]).trim(), nm = String(r[1]).trim().replace(/\s+/g, ' ');
+    if (!/^[A-Za-z0-9_-]+$/.test(n) || !/[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(nm) || /^n[oó]m/i.test(n) || vistos.has(n)) return;
+    vistos.add(n); out.push({ nomina:n, nombre:nm, clave:String(r[2] == null ? '' : r[2]).trim(), existe:!!S.usuarios[n] });
+  });
+  return out;
+}
+function importPreview(list) {
+  const sel = new Set(list.filter(x => !x.existe).map(x => x.nomina)), nuevos = sel.size, conClave = DB.mode === 'firebase' && list.some(x => x.clave);
+  const m = modal(`<h2>Importar usuarios</h2><p class="sm mu">${list.length} registros leídos · ${nuevos} nuevos · ${list.length - nuevos} ya existen. Se crearán como vigilantes.</p>
+    ${conClave ? `<div class="card" style="margin:10px 0"><b>¿Qué contraseña usarán?</b>
+      <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin:8px 0 0"><input type="radio" name="imclave" value="lista" checked>Usar la contraseña del listado (3.ª columna)</label>
+      <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin:6px 0 0"><input type="radio" name="imclave" value="gen">Generar un PIN nuevo de 6 dígitos para cada uno</label>
+      <p class="sm mu" style="margin-top:8px">Las contraseñas del archivo se envían a Firebase Authentication, que las guarda cifradas. No se guardan en la base de datos ni en la página.</p></div>`
+      : `<p class="sm mu">Se usan solo la nómina y el nombre; cada usuario recibe un PIN nuevo de 6 dígitos.</p>`}
+    ${DB.mode === 'firebase' ? '<label style="display:flex;gap:8px;align-items:center;font-weight:400;margin:10px 0 0"><input type="checkbox" id="imcamb" checked>Pedir que cambien la contraseña en su primer acceso (recomendado)</label>' : ''}
+    <input id="imq" placeholder="Buscar por nómina o nombre" style="margin:10px 0"><div class="tw" style="max-height:40vh;overflow:auto"><table><thead><tr><th><input type="checkbox" id="imall" checked aria-label="Seleccionar todos"></th><th>Nómina</th><th>Nombre</th><th>Estado</th></tr></thead><tbody id="imb"></tbody></table></div>
+    <div class="row"><button class="btn sec" data-act="closeModal">Cancelar</button><button class="btn" id="imgo"></button></div>`);
+  const body = $('#imb', m), go = $('#imgo', m);
+  const pintar = () => {
+    const q = $('#imq', m).value.toLowerCase();
+    body.innerHTML = list.filter(x => (x.nomina + ' ' + x.nombre).toLowerCase().includes(q)).map(x => `<tr><td>${x.existe ? '' : `<input type="checkbox" data-n="${esc(x.nomina)}" ${sel.has(x.nomina) ? 'checked' : ''}>`}</td><td>${esc(x.nomina)}</td><td>${esc(x.nombre)}</td><td>${x.existe ? '<span class="mu">Ya existe</span>' : 'Nuevo'}</td></tr>`).join('');
+    go.textContent = `Crear ${sel.size} usuario(s)`; go.disabled = !sel.size;
+  };
+  $('#imq', m).oninput = pintar;
+  body.onchange = e => { const n = e.target.dataset.n; if (n) { e.target.checked ? sel.add(n) : sel.delete(n); pintar(); } };
+  $('#imall', m).onchange = e => { const q = $('#imq', m).value.toLowerCase(); list.filter(x => !x.existe && (x.nomina + ' ' + x.nombre).toLowerCase().includes(q)).forEach(x => e.target.checked ? sel.add(x.nomina) : sel.delete(x.nomina)); pintar(); };
+  go.onclick = () => { const items = list.filter(x => sel.has(x.nomina)); const lista = conClave && $('input[name=imclave]:checked', m).value === 'lista'; list.forEach(x => { if (!sel.has(x.nomina) || !lista) x.clave = ''; }); (DB.mode === 'firebase' ? importCrearFb : importCrear)(items, lista, !!($('#imcamb', m) && $('#imcamb', m).checked)); };
+  pintar();
+}
+async function importCrear(items) {
+  const m = modal(`<h2>Creando usuarios…</h2><p class="mu" id="imp">0 de ${items.length}</p>`), res = [], upd = {};
+  try {
+    for (const [i, x] of items.entries()) {
+      const pin = genPin(x.nomina); upd[x.nomina] = { nomina:x.nomina, nombre:x.nombre, rol:'vigilante', pin:await hashPin(pin) }; res.push({ nomina:x.nomina, nombre:x.nombre, pin });
+      const el = $('#imp'); if (el) el.textContent = `${i + 1} de ${items.length}`;
+    }
+    await DB.update('/usuarios', upd);
+  } catch (e) { closeModal(); toast('No se pudieron crear los usuarios: ' + (e.message || e), 'bad'); return; }
+  Object.assign(S.usuarios, upd); pinesCreados(res);
+}
+async function importCrearFb(items, usarLista, cambiar) {
+  modal(`<h2>Creando usuarios…</h2><p class="mu" id="imp">0 de ${items.length}</p>`);
+  const res = [], upd = {}; let aviso = '';
+  for (const [i, x] of items.entries()) {
+    const propia = usarLista && x.clave, clave = propia ? x.clave : genPin(x.nomina);
+    try {
+      const ac = await crearAcceso(x.nomina, clave, 1);
+      upd['usuarios/' + ac.uid] = { nomina:x.nomina, nombre:x.nombre, rol:'vigilante', alias:ac.alias, v:ac.v, cambiar:!!cambiar }; upd['accesos/' + x.nomina] = ac.alias;
+      res.push({ nomina:x.nomina, nombre:x.nombre, pin:propia ? null : clave });
+    } catch (e) { aviso = (e && e.code === 'auth/too-many-requests') ? 'Firebase pidió una pausa. Espera unos minutos y vuelve a importar el mismo archivo: se omiten los ya creados.' : `Se detuvo en la nómina ${x.nomina}: ${(e && e.message) || e}`; break; }
+    x.clave = ''; const el = $('#imp'); if (el) el.textContent = `${i + 1} de ${items.length}`;
+  }
+  items.forEach(x => { x.clave = ''; });
+  try { if (Object.keys(upd).length) await DB.update('/', upd); } catch (e) { closeModal(); toast('Las cuentas se crearon, pero no se guardaron los perfiles: ' + (e.message || e), 'bad'); return; }
+  Object.entries(upd).forEach(([k, v]) => { if (k.startsWith('usuarios/')) S.usuarios[v.nomina] = { ...v, uid:k.slice(9) }; });
+  pinesCreados(res, aviso);
+}
+function pinesCreados(res, aviso = '') {
+  const hayPin = res.some(r => r.pin);
+  const m = modal(`<h2>${res.length} usuario(s) creados</h2>
+    ${aviso ? `<div class="warn bad" style="margin:8px 0">${esc(aviso)}</div>` : ''}
+    <div class="warn ${hayPin ? 'bad' : ''}" style="margin:8px 0 12px">${hayPin ? 'Guarda o imprime esta hoja ahora. Los PIN no se guardan en claro y no se podrán volver a ver; si alguien lo olvida, usa «Cambiar PIN».' : 'Entran con la contraseña del listado. Las contraseñas no se muestran ni se guardan en la plataforma.'}</div>
+    <div class="tw" style="max-height:42vh;overflow:auto"><table><thead><tr><th>Nómina</th><th>Nombre</th><th>${hayPin ? 'PIN' : 'Contraseña'}</th></tr></thead><tbody>${res.map(r => `<tr><td>${esc(r.nomina)}</td><td>${esc(r.nombre)}</td><td>${r.pin ? `<b>${r.pin}</b>` : '<span class="mu">la del listado</span>'}</td></tr>`).join('')}</tbody></table></div>
+    <div class="row"><button class="btn sec" id="pxl">Descargar Excel</button>${hayPin ? '<button class="btn sec" id="ppr">Imprimir</button>' : ''}<button class="btn" id="pok">Listo</button></div>`);
+  $('#pxl', m).onclick = () => { const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(res.map(r => ({ 'Nómina':r.nomina, Nombre:r.nombre, PIN:r.pin || '(contraseña del listado)' }))), 'Usuarios'); XLSX.writeFile(wb, `Usuarios_vigilantes_${dstr()}.xlsx`); };
+  if ($('#ppr', m)) $('#ppr', m).onclick = () => { const w = window.open('', '_blank'); if (!w) { toast('Permite las ventanas emergentes para imprimir', 'bad'); return; }
+    w.document.write(`<html><head><title>PIN de vigilantes</title><style>body{font-family:'Segoe UI',Arial,sans-serif;margin:20px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #cbd5e1;padding:8px;text-align:left}th{background:#0D18A8;color:#fff}</style></head><body><h2>Rondines de vigilancia — PIN de acceso (${dstr()})</h2><p>Documento confidencial. Entrégalo en mano y destrúyelo después.</p><table><tr><th>Nómina</th><th>Nombre</th><th>PIN</th></tr>${res.map(r => `<tr><td>${esc(r.nomina)}</td><td>${esc(r.nombre)}</td><td>${r.pin ? `<b>${r.pin}</b>` : 'la del listado'}</td></tr>`).join('')}</table><script>setTimeout(function(){print()},300)<\/script></body></html>`); w.document.close(); };
+  $('#pok', m).onclick = () => { res.length = 0; closeModal(); render(); };
+}
+
 /* ---------- Gráficas (Chart.js, paleta Zubex) ---------- */
 let charts = [];
 function drawCharts() {
@@ -1087,7 +1278,7 @@ function exportXlsx() {
 
 /* ---------- Render ---------- */
 function render() {
-  const v = { login:vLogin, home:vHome, punto:vPunto, round:vRound, closed:vClosed, hist:vHist, sup:vSup }[S.view];
+  const v = { login:vLogin, home:vHome, cambiar:vCambiar, punto:vPunto, round:vRound, closed:vClosed, hist:vHist, sup:vSup }[S.view];
   $('#app').innerHTML = v ? v() : '<div class="wrap center mu" style="padding-top:80px">Cargando…</div>';
   if (S.view === 'sup' && S.tab === 'resumen') drawCharts();
   if (S.view === 'sup' && S.tab === 'monitor') mountMonitor();
@@ -1095,6 +1286,7 @@ function render() {
   if (S.qr) { const qv = $('#qrv'); if (qv && QRS.stream && !qv.srcObject) { qv.srcObject = QRS.stream; qv.play().catch(() => {}); } }
   const want = S.view === 'sup' && S.tab === 'monitor';
   if (want && !S.unwatch) startWatch(); else if (!want && S.unwatch) stopWatch();
+  if (S.view === 'cambiar') $('#fCambiar').addEventListener('submit', e => { e.preventDefault(); doCambiar(); });
   if (S.view === 'login') {
     const fl = $('#fLogin'), fs = $('#fSetup');
     if (fl) fl.addEventListener('submit', e => { e.preventDefault(); doLogin($('#lu').value, $('#lp').value); });
@@ -1112,7 +1304,7 @@ function readRouteForm() {
   d.durMin = +$('#rf-dmin').value || 0; d.durMax = +$('#rf-dmax').value || 0; d.intervalo = +$('#rf-int').value || 0; d.orden = $('#rf-ord').value;
 }
 const ACT = {
-  logout() { localStorage.removeItem('rz_ses'); S.user = null; S.active = null; S.view = 'login'; render(); },
+  logout() { localStorage.removeItem('rz_ses'); S.lastPin = null; if (AUTH) AUTH.signOut().catch(() => {}); S.user = null; S.active = null; S.view = 'login'; render(); },
   start(t) { startRondin(t.dataset.id); },
   resume() { S.view = 'round'; render(); wake(); },
   nfc() { startNfc(); },
@@ -1167,6 +1359,20 @@ const ACT = {
       closeModal(); toast('Rondín cerrado como incompleto'); if (S.tab === 'monitor') refreshMonitor(); else render();
     };
   },
+  uImport() { $('#uFile').click(); },
+  miPin() {
+    const min = S.user.rol === 'supervisor' ? 8 : 6;
+    const m = modal(`<h2>Cambiar mi PIN o contraseña</h2><label for="pa">Actual</label><input id="pa" type="password" autocomplete="current-password" autocapitalize="off"><label for="pn">Nueva (mínimo ${min} caracteres)</label><input id="pn" type="password" autocomplete="new-password" autocapitalize="off"><label for="pr">Repite la nueva</label><input id="pr" type="password" autocomplete="new-password" autocapitalize="off"><div class="row"><button class="btn sec" id="pcn">Cancelar</button><button class="btn" id="pcy">Guardar</button></div>`);
+    $('#pcn', m).onclick = closeModal;
+    $('#pcy', m).onclick = async () => {
+      const a = $('#pa', m).value, n = $('#pn', m).value, r = $('#pr', m).value;
+      if (n.length < min) { toast(`Mínimo ${min} caracteres`, 'bad'); return; }
+      if (n !== r) { toast('La nueva contraseña no coincide', 'bad'); return; }
+      if (n === a || n === S.user.nomina) { toast('Elige una contraseña distinta', 'bad'); return; }
+      try { const u = AUTH.currentUser; await u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email, fbPass(a))); await u.updatePassword(fbPass(n)); closeModal(); toast('Contraseña actualizada'); }
+      catch (e) { toast(authErr(e), 'bad'); }
+    };
+  },
   /* plano y monitor */
   gmap() { S.gmap = true; render(); },
   gmapClose() { S.gmap = false; render(); },
@@ -1192,7 +1398,10 @@ const ACT = {
   rpLive() { clearInterval(S.mon.timer); S.mon.timer = null; S.mon.upto = null; refreshMonitor(); },
   verPlano(t) { const r = findR(t.dataset.f, t.dataset.id); if (!r) return; Object.assign(S.mon, { sel:r.id, mode:'vivo', upto:null, fit:true }); S.tab = 'monitor'; closeModal(); render(); },
   /* supervisión */
-  tab(t) { S.tab = t.dataset.k; render(); },
+  tab(t) {
+    const k = t.dataset.k; S.tab = k; render();
+    if (['resumen', 'rondines', 'hallazgos'].includes(k)) loadRange(S.f.desde, S.f.hasta).then(() => { if (S.view === 'sup' && S.tab === k) render(); }).catch(() => {});
+  },
   ctab(t) { S.ctab = t.dataset.k; render(); },
   apply() {
     const f = S.f; f.desde = $('#fd').value || f.desde; f.hasta = $('#fh').value || f.hasta;
@@ -1261,9 +1470,18 @@ const ACT = {
     if (!/^[A-Za-z0-9_-]+$/.test(n) || !nm) { toast('Revisa la nómina (letras o números) y el nombre', 'bad'); return; }
     const perr = pinInvalido(pin, n, $('#ur').value); if (perr) { toast(perr, 'bad'); return; }
     if (S.usuarios[n]) { toast('Esa nómina ya existe', 'bad'); return; }
+    if (DB.mode === 'firebase') {
+      try {
+        if (await DB.get('/accesos/' + n)) { toast('Esa nómina ya existe', 'bad'); return; }
+        const ac = await crearAcceso(n, pin, 1), perfil = { nomina:n, nombre:nm, rol:$('#ur').value, alias:ac.alias, v:ac.v, cambiar:true };
+        await DB.update('/', { ['usuarios/' + ac.uid]:perfil, ['accesos/' + n]:ac.alias }); S.usuarios[n] = { ...perfil, uid:ac.uid }; render(); toast('Usuario agregado');
+      } catch (e) { toast('No se pudo crear el usuario: ' + (e.message || e), 'bad'); }
+      return;
+    }
     const u = { nomina:n, nombre:nm, rol:$('#ur').value, pin:await hashPin(pin) }; S.usuarios[n] = u; await DB.set('/usuarios/' + n, u); render(); toast('Usuario agregado');
   },
   async uPin(t) {
+    if (DB.mode === 'firebase') { await resetPin(t.dataset.id); return; }
     const u = S.usuarios[t.dataset.id]; if (!u) return;
     const pin = await askText('Nuevo PIN (6 dígitos o más; 8 para supervisores)', 'PIN', 'Guardar', true); if (!pin) return;
     const perr = pinInvalido(pin, u.nomina, u.rol); if (perr) { toast(perr, 'bad'); return; }
@@ -1271,6 +1489,12 @@ const ACT = {
   },
   async uDel(t) {
     if (!await confirmBox(`¿Eliminar al usuario ${t.dataset.id}?`, 'Eliminar', true)) return;
+    const du = S.usuarios[t.dataset.id];
+    if (DB.mode === 'firebase') {
+      if (!du || du.nomina === S.user.nomina) { toast('No puedes eliminar tu propio usuario', 'bad'); return; }
+      try { await DB.update('/', { ['usuarios/' + du.uid]:null, ['accesos/' + du.nomina]:null }); delete S.usuarios[du.nomina]; render(); toast('Usuario eliminado'); } catch (e) { toast('No se pudo eliminar: ' + (e.message || e), 'bad'); }
+      return;
+    }
     delete S.usuarios[t.dataset.id]; await DB.remove('/usuarios/' + t.dataset.id); render();
   },
   async resetLocal() { if (await confirmBox('Se borrarán todos los datos de prueba de este navegador.', 'Restablecer', true)) { localStorage.removeItem('rz_localdb'); localStorage.removeItem('rz_active'); localStorage.removeItem('rz_ses'); location.reload(); } }
@@ -1278,6 +1502,12 @@ const ACT = {
 document.addEventListener('click', e => { const t = e.target.closest('[data-act]'); if (!t) return; const f = ACT[t.dataset.act]; if (f) { e.preventDefault(); f(t, e); } });
 document.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.stop[data-act]')) { e.preventDefault(); e.target.click(); } });
 document.addEventListener('change', async e => {
+  if (e.target.id === 'uFile') {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    try { const list = await leerListado(f); if (!list.length) { toast('No encontré filas con nómina y nombre en el archivo', 'bad'); return; } importPreview(list); }
+    catch (err) { toast('No se pudo leer el archivo', 'bad'); }
+    return;
+  }
   const t = e.target, b = t.dataset && t.dataset.bind;
   if (b === 'pname') { const v = t.value.trim(); if (!v) { t.value = S.puntos[t.dataset.id].nombre; return; } S.puntos[t.dataset.id].nombre = v; await DB.set(`/puntos/${t.dataset.id}/nombre`, v); toast('Nombre guardado'); }
   if (b === 'base') { const v = t.value.trim(); S.cfg.baseUrl = v; await DB.set('/config/baseUrl', v); toast('URL base guardada'); }
@@ -1295,6 +1525,12 @@ document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.ma
   const q = new URLSearchParams(location.search);
   if (q.get('punto')) { S.pending = { pid:q.get('punto'), k:q.get('k') || '' }; history.replaceState(null, '', location.pathname); }
   render();
+  if (DB.mode === 'firebase') {
+    const u = await new Promise(res => { const un = AUTH.onAuthStateChanged(x => { un(); res(x); }); });
+    if (u) { try { await afterAuth(u); } catch (e) { S.view = 'login'; render(); toast('No se pudo iniciar sesión: ' + (e.message || e), 'bad'); } return; }
+    try { S.setup = !(await DB.get('/estado/inicializado')); } catch (e) { S.setup = false; }
+    S.view = 'login'; render(); return;
+  }
   try { await loadBase(); } catch (e) { $('#app').innerHTML = `<div class="wrap"><div class="card"><h2>No se pudo conectar con la base de datos</h2><p class="mu sm" style="margin-top:6px">${esc(e.message || e)}</p></div></div>`; return; }
   const ses = localStorage.getItem('rz_ses');
   if (ses && S.usuarios[ses]) { S.user = S.usuarios[ses]; loadActive(); enterApp(); }
