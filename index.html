@@ -178,6 +178,9 @@ tr.clk:hover td{background:var(--azl)}
 .gmh{display:flex;gap:10px;align-items:center;justify-content:space-between;background:var(--az);color:#fff;padding:calc(env(safe-area-inset-top,0px) + 10px) 16px 10px}
 .gmo .maphost{flex:1;height:auto;min-height:0;border:0;border-radius:0}
 .gmf{padding:10px 16px calc(env(safe-area-inset-bottom,0px) + 10px);font-size:13px;color:var(--mu);border-top:1px solid var(--ln)}
+.qrbox{position:relative;flex:1;background:#000;overflow:hidden}
+.qrbox video{width:100%;height:100%;object-fit:cover;display:block}
+.qrframe{position:absolute;left:50%;top:50%;width:min(70vw,320px);aspect-ratio:1;transform:translate(-50%,-50%);border:3px solid #fff;border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.45);pointer-events:none}
 @media (max-width:980px){.mon{grid-template-columns:1fr}.maphost{height:62vh}}
 @media (max-width:520px){.two{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -193,6 +196,7 @@ tr.clk:hover td{background:var(--azl)}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 'use strict';
 /* =====================================================================
@@ -267,7 +271,7 @@ const DB = (() => {
 /* ---------- Estado ---------- */
 const S = { view:'loading', user:null, puntos:{}, rutas:{}, usuarios:{}, cfg:{}, active:null, pending:null, sheet:null,
   rond:{}, tab:'monitor', ctab:'puntos', rid:null, draft:null, nfcOn:false, tm:null, lastClosed:null,
-  mon:{ mode:'vivo', sel:null, upto:null, place:null, areas:false, fit:true, timer:null }, mapVB:null, gmap:false, unwatch:null, tick:null, watchDay:null,
+  mon:{ mode:'vivo', sel:null, upto:null, place:null, areas:false, fit:true, timer:null }, mapVB:null, gmap:false, qr:false, unwatch:null, tick:null, watchDay:null,
   f:{ desde:addDays(dstr(), -13), hasta:dstr(), ruta:'', vig:'', estado:'', tipo:'', aten:'abierto' } };
 
 /* ---------- Datos iniciales (de tu Excel: pestañas Mapeo, Secuencia y Frecuencia) ---------- */
@@ -521,13 +525,14 @@ function vRound() {
       ${next ? `<div class="next"><div class="ring">${NFCSVG}</div><div><div class="sm mu">Siguiente punto</div><div style="font-size:19px;font-weight:700;line-height:1.25">${esc(ron.nombres[next] || next)}</div><div class="sm mu" style="margin-top:4px">Acerca el celular a la etiqueta</div></div></div>`
         : `<div class="next fin"><div class="ring"><span style="font-size:28px;font-weight:700">✓</span></div><div><div style="font-size:18px;font-weight:700">Todos los puntos escaneados</div><div class="sm mu">Finaliza el rondín para cerrarlo</div></div></div>`}
       ${NFC && !S.nfcOn ? '<button class="btn sec block" data-act="nfc">Activar lector NFC</button>' : ''}
+      <button class="btn sec block" data-act="qrOpen" style="margin-top:8px">Escanear QR con la cámara</button>
       <button class="btn sec block" data-act="gmap" style="margin-top:8px">Ver mapa del recorrido</button>
       <div class="tl" style="margin-top:14px">
         ${esp.map(p => { const l = L[p]; return stop(p, l ? (l.estado === 'hallazgo' ? 'done hall' : 'done') : (p === next ? 'pend nx' : 'pend'), l ? (l.estado === 'hallazgo' ? '!' : '✓') : '', l, !l); }).join('')}
         ${extra.map(p => stop(p, 'done', '✓', L[p], false)).join('')}
         <p class="sm mu" style="margin-top:14px">¿La etiqueta está dañada o no lee? Toca el punto para registrarlo manualmente.</p>
       </div></div>
-    <div class="bottom"><button class="btn block ${next ? '' : 'ok'}" data-act="finish">Finalizar rondín</button></div>${sheetHtml()}${S.gmap ? gmapHtml() : ''}`;
+    <div class="bottom"><button class="btn block ${next ? '' : 'ok'}" data-act="finish">Finalizar rondín</button></div>${sheetHtml()}${S.gmap ? gmapHtml() : ''}${S.qr ? qrHtml() : ''}`;
 }
 function vClosed() {
   const r = S.lastClosed, st = stats(r), ok = r.estado === 'completo';
@@ -981,6 +986,39 @@ function mountGuardMap() {
   $('#gmNote').innerHTML = legendHtml() + (m.unp.length ? `<div style="margin-top:6px">${m.unp.length} punto(s) de esta ruta aún no tienen ubicación en el plano.</div>` : '');
 }
 
+/* ---------- Lectura de QR con la cámara ---------- */
+const QRS = { stream:null, timer:null, last:0 };
+const qrHtml = () => `<div class="gmo"><div class="gmh"><b>Escanear código QR</b><button class="btn sm sec" data-act="qrClose" style="flex:none;background:transparent;color:#fff;border-color:rgba(255,255,255,.7)">Cerrar</button></div>
+  <div class="qrbox"><video id="qrv" playsinline muted autoplay></video><div class="qrframe"></div></div><div class="gmf">Apunta la cámara al QR pegado en el punto. Se registra solo al leerlo.</div></div>`;
+function qrDecode(src, w, h) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const cx = cv.getContext('2d', { willReadFrequently:true }); cx.drawImage(src, 0, 0, w, h);
+  const c = window.jsQR && jsQR(cx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts:'dontInvert' });
+  return c ? c.data : null;
+}
+async function qrStart() {
+  try { QRS.stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1280 } }, audio:false }); }
+  catch (e) { S.qr = false; render(); toast('No se pudo abrir la cámara. Permite el acceso a la cámara en el navegador (la página debe abrirse con https).', 'bad'); return; }
+  const v = $('#qrv'); if (!v || !S.qr) { qrStop(); return; }
+  v.srcObject = QRS.stream; try { await v.play(); } catch (e) {}
+  const bd = 'BarcodeDetector' in window ? new BarcodeDetector({ formats:['qr_code'] }) : null;
+  QRS.timer = setInterval(async () => {
+    const el = $('#qrv'); if (!el || el.readyState < 2 || !el.videoWidth) return;
+    let txt = null;
+    try {
+      if (bd) { const r = await bd.detect(el); if (r.length) txt = r[0].rawValue; }
+      else { const w = Math.min(640, el.videoWidth); txt = qrDecode(el, w, Math.round(w * el.videoHeight / el.videoWidth)); }
+    } catch (e) {}
+    if (txt) qrFound(txt);
+  }, 200);
+}
+function qrStop() { clearInterval(QRS.timer); QRS.timer = null; if (QRS.stream) { QRS.stream.getTracks().forEach(t => t.stop()); QRS.stream = null; } }
+function qrFound(txt) {
+  const t = parseTag(txt);
+  if (!t) { if (Date.now() - QRS.last > 2000) { QRS.last = Date.now(); toast('Ese QR no es de un punto de rondín', 'bad'); } return; }
+  qrStop(); S.qr = false; handleScan(t.pid, t.k);
+}
+
 /* ---------- Gráficas (Chart.js, paleta Zubex) ---------- */
 let charts = [];
 function drawCharts() {
@@ -1013,6 +1051,7 @@ function render() {
   if (S.view === 'sup' && S.tab === 'resumen') drawCharts();
   if (S.view === 'sup' && S.tab === 'monitor') mountMonitor();
   if (S.view === 'round' && S.gmap) mountGuardMap();
+  if (S.qr) { const qv = $('#qrv'); if (qv && QRS.stream && !qv.srcObject) { qv.srcObject = QRS.stream; qv.play().catch(() => {}); } }
   const want = S.view === 'sup' && S.tab === 'monitor';
   if (want && !S.unwatch) startWatch(); else if (!want && S.unwatch) stopWatch();
   if (S.view === 'login') $('#fLogin').addEventListener('submit', e => { e.preventDefault(); doLogin($('#lu').value, $('#lp').value); });
@@ -1032,6 +1071,13 @@ const ACT = {
   start(t) { startRondin(t.dataset.id); },
   resume() { S.view = 'round'; render(); wake(); },
   nfc() { startNfc(); },
+  qrOpen() { S.qr = true; render(); qrStart(); },
+  qrClose() { qrStop(); S.qr = false; render(); },
+  pQRdl(t) {
+    const id = t.dataset.id, tmp = document.createElement('div'); tmp.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.appendChild(tmp);
+    new QRCode(tmp, { text:tagUrl(id), width:600, height:600, colorDark:'#000000', colorLight:'#ffffff' });
+    const c = tmp.querySelector('canvas'), a = document.createElement('a'); a.href = c.toDataURL('image/png'); a.download = `QR_${id}.png`; a.click(); tmp.remove();
+  },
   verRondin() { clearTimeout(S.tm); S.sheet = null; S.view = 'round'; render(); },
   sinRegistrar() { S.pending = null; S.view = S.active ? 'round' : 'home'; render(); },
   goHome() { S.view = S.active ? 'round' : 'home'; render(); },
@@ -1130,7 +1176,7 @@ const ACT = {
   },
   pQR(t) {
     const id = t.dataset.id, url = tagUrl(id);
-    modal(`<h2>${esc(S.puntos[id].nombre)}</h2><p class="mu sm">${id}</p><div id="qr" style="display:grid;place-items:center;padding:14px"></div><label>URL de la etiqueta</label><input readonly value="${esc(url)}" onclick="this.select()"><div class="row"><button class="btn sec" data-act="closeModal">Cerrar</button></div>`);
+    modal(`<h2>${esc(S.puntos[id].nombre)}</h2><p class="mu sm">${id}</p><div id="qr" style="display:grid;place-items:center;padding:14px"></div><label>URL de la etiqueta</label><input readonly value="${esc(url)}" onclick="this.select()"><div class="row"><button class="btn sec" data-act="pQRdl" data-id="${id}">Descargar QR</button><button class="btn sec" data-act="closeModal">Cerrar</button></div>`);
     new QRCode($('#qr'), { text:url, width:220, height:220, colorDark:'#0D18A8', colorLight:'#ffffff' });
   },
   async pNFC(t) {
