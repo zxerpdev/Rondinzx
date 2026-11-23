@@ -181,6 +181,31 @@ tr.clk:hover td{background:var(--azl)}
 .qrbox{position:relative;flex:1;background:#000;overflow:hidden}
 .qrbox video{width:100%;height:100%;object-fit:cover;display:block}
 .qrframe{position:absolute;left:50%;top:50%;width:min(70vw,320px);aspect-ratio:1;transform:translate(-50%,-50%);border:3px solid #fff;border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.45);pointer-events:none}
+
+/* Plano oscuro, consulta e inicio del vigilante */
+.maphost.dark{background:#0b1220;border-color:#1e2a44}
+.dark .mn{fill:#e6edf7;stroke:#0b1220}
+.dark .etq{fill:#9cc2ff;stroke:#0b1220}
+.dark .mtip{background:#111a2e;color:#e6edf7;border-color:#26324f}
+.dark .mz .btn{background:#111a2e;color:#cfe0ff;border-color:#3b5ba8}
+.gmo.dk{background:#0b1220}
+.gmo.dk .gmf{background:#0b1220;color:#9fb0cf;border-top-color:#1e2a44}
+.gmo.dk .lg{color:#9fb0cf}
+.consq{position:relative;background:#0f1a30;padding:10px 12px}
+.consq input{background:#111a2e;color:#e6edf7;border:1px solid #26324f;padding:11px 14px;font-size:16px}
+.consq input::placeholder{color:#7f90b3}
+.consb{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.cb{border:1px solid #3b5ba8;background:transparent;color:#cfe0ff;border-radius:999px;padding:6px 14px;font:600 13px 'Poppins','Segoe UI',sans-serif;cursor:pointer}
+.cb.on{background:#2563eb;border-color:#2563eb;color:#fff}
+.consr{position:absolute;left:12px;right:12px;top:58px;background:#111a2e;border:1px solid #26324f;border-radius:10px;max-height:42vh;overflow:auto;z-index:3;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+.consr button{display:flex;justify-content:space-between;gap:10px;align-items:center;width:100%;background:none;border:0;border-bottom:1px solid #1e2a44;color:#e6edf7;padding:13px 12px;font:inherit;font-size:15px;text-align:left;cursor:pointer}
+.consr small{color:#7f90b3;font-size:12px;flex:none}
+.consn{padding:14px 12px;color:#9fb0cf;font-size:14px}
+.rtg{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.rt{background:var(--bg);border:1px solid var(--ln);border-radius:12px;padding:12px}
+.rtv{font-size:28px;font-weight:700;color:var(--az);line-height:1.1;font-variant-numeric:tabular-nums}
+.rtl{font-size:12px;color:var(--mu);font-weight:600;margin-top:2px}
+.okline{background:#dcfce7;color:var(--ok);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:600;margin-bottom:10px}
 @media (max-width:980px){.mon{grid-template-columns:1fr}.maphost{height:62vh}}
 @media (max-width:520px){.two{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -300,7 +325,7 @@ const AUTH = DB.mode === 'firebase' ? firebase.auth() : null;
 /* ---------- Estado ---------- */
 const S = { view:'loading', user:null, puntos:{}, rutas:{}, usuarios:{}, cfg:{}, active:null, pending:null, sheet:null,
   rond:{}, tab:'monitor', ctab:'puntos', rid:null, draft:null, nfcOn:false, tm:null, lastClosed:null,
-  mon:{ mode:'vivo', sel:null, upto:null, place:null, areas:false, fit:true, timer:null }, mapVB:null, gmap:false, qr:false, unwatch:null, tick:null, watchDay:null,
+  mon:{ mode:'vivo', sel:null, upto:null, place:null, areas:false, fit:true, timer:null }, mapVB:null, mapTheme:'oscuro', cons:{ areas:true, puntos:true, sel:null }, gmap:false, qr:false, unwatch:null, tick:null, watchDay:null,
   f:{ desde:addDays(dstr(), -13), hasta:dstr(), ruta:'', vig:'', estado:'', tipo:'', aten:'abierto' } };
 
 /* ---------- Datos iniciales (de tu Excel: pestañas Mapeo, Secuencia y Frecuencia) ---------- */
@@ -530,6 +555,7 @@ function enterApp() {
     return;
   }
   S.view = S.active ? 'round' : 'home'; render();
+  if (S.view === 'home' && S.user.rol !== 'supervisor') loadMine();
 }
 
 /* ---------- Rondín: inicio, lectura, hallazgo, cierre ---------- */
@@ -622,20 +648,112 @@ function tocaAhora(r) {
   if (!diasOf(r).includes(now.getDay())) return false;
   return hors(r).some(h => { const [H, M] = h.split(':').map(Number), t = new Date(); t.setHours(H, M, 0, 0); let d = (now - t) % DAY; if (d > DAY / 2) d -= DAY; if (d < -DAY / 2) d += DAY; return Math.abs(d) <= 60 * 6e4; });
 }
+/* ---------- Plano de consulta (para quien aún no conoce la planta) ---------- */
+const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+function consItems() {
+  return [...AREAS.map(a => ({ tipo:'Área', nombre:a.nombre, c:a.c, key:'a:' + a.id })),
+    ...Object.values(S.puntos).sort(byId).filter(p => placed(p.id)).map(p => ({ tipo:'Punto de revisión', nombre:p.nombre, c:placed(p.id), key:'p:' + p.id }))];
+}
+function drawCons() {
+  const marks = [];
+  if (S.cons.puntos) Object.values(S.puntos).forEach(p => { const q = placed(p.id); if (q) marks.push({ pid:'p:' + p.id, x:q[0], y:q[1], st:'pl', n:null, title:p.nombre, label:p.nombre, show:false }); });
+  const sel = S.cons.sel; if (sel) marks.push({ pid:sel.key, x:sel.c[0], y:sel.c[1], st:'plsel', n:null, title:sel.nombre, label:sel.tipo === 'Área' ? '' : sel.nombre, show:true });
+  drawModel({ marks, trace:[], pend:[], pins:[] });
+  $('#consNote').innerHTML = (S.cons.puntos ? `<span class="lg"><i class="lgd" style="background:${TH().mst.pl.f};border:2px solid ${TH().mst.pl.s}"></i>Punto de revisión</span>` : '') + '<span class="lg">Toca un área o un punto, o búscalo por nombre. Acerca con los dedos.</span>';
+}
+function consPick(key) {
+  const it = consItems().find(i => i.key === key); if (!it) return;
+  S.cons.sel = it; drawCons();
+  fitBox({ x0:it.c[0], x1:it.c[0], y0:it.c[1], y1:it.c[1] }, 1, false, 70);
+  MAP.tip(`<b>${esc(it.nombre)}</b><br><span style="opacity:.75">${it.tipo}</span>`);
+}
+function consBuscar() {
+  const q = norm($('#consq').value.trim()), box = $('#consr');
+  if (q.length < 2) { box.hidden = true; return; }
+  const items = consItems().filter(i => norm(i.nombre).includes(q)).slice(0, 8);
+  box.innerHTML = items.length ? items.map(i => `<button data-act="consPick" data-k="${esc(i.key)}"><span>${esc(i.nombre)}</span><small>${i.tipo}</small></button>`).join('') : '<div class="consn">Sin resultados</div>';
+  box.hidden = false;
+}
+function showCons() {
+  closeCons(); S.cons.sel = null;
+  const d = document.createElement('div');
+  d.innerHTML = `<div class="gmo cons ${S.mapTheme !== 'claro' ? 'dk' : ''}" id="consRoot"><div class="gmh"><b>Plano de la planta</b><button class="btn sm sec" data-act="consClose" style="flex:none;background:transparent;color:#fff;border-color:rgba(255,255,255,.7)">Cerrar</button></div>
+    <div class="consq"><input id="consq" type="search" placeholder="Buscar un área o punto (ej. Corrugado, Comedor, Taller)" autocomplete="off" autocapitalize="off" aria-label="Buscar en el plano">
+      <div class="consb"><button class="cb ${S.cons.areas ? 'on' : ''}" data-act="consAreas">Áreas</button><button class="cb ${S.cons.puntos ? 'on' : ''}" data-act="consPuntos">Puntos de revisión</button></div><div id="consr" class="consr" hidden></div></div>
+    <div id="consHost" class="maphost"></div><div class="gmf" id="consNote"></div></div>`;
+  document.body.appendChild(d.firstElementChild);
+  mountMap($('#consHost'), { areas:S.cons.areas, onPoint:k => consPick(k), onArea:a => consPick('a:' + a.id) }, null);
+  MAP.redraw = drawCons; drawCons(); fitBox(homeBox, 1, true);
+  $('#consq').addEventListener('input', consBuscar);
+}
+function closeCons() { const r = $('#consRoot'); if (r) { r.remove(); MAP.svg = null; MAP.host = null; } }
+
+/* ---------- Inicio del vigilante: sus resultados y el rondín que toca por la hora ---------- */
+const MINU = 6e4;
+const titulo = s => String(s || '').toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase());
+const falta = ms => { const m = Math.max(1, Math.round(ms / MINU)); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
+function misRondines(dias) { const t = dstr(); return inRange(addDays(t, -dias), t).filter(r => r.nomina === S.user.nomina); }
+function turnoSlots() {
+  const now = Date.now(), t = dstr(), mine = misRondines(1), out = [];
+  for (const off of [-1, 0, 1]) {
+    const d = addDays(t, off), dow = new Date(d + 'T12:00:00').getDay();
+    Object.values(S.rutas).forEach(r => {
+      if (!diasOf(r).includes(dow)) return;
+      hors(r).forEach(hr => {
+        const [H, M] = hr.split(':').map(Number), tt = new Date(d + 'T00:00:00'); tt.setHours(H, M, 0, 0); const ts = tt.getTime();
+        if (ts < now - 3 * 60 * MINU || ts > now + 26 * 60 * MINU) return;
+        const m = mine.find(x => x.rutaId === r.id && Math.abs(x.inicio - ts) <= 60 * MINU);
+        const est = m ? (m.estado === 'en_curso' ? 'curso' : 'hecho') : now < ts - 30 * MINU ? 'proximo' : now <= ts + 60 * MINU ? 'ahora' : now <= ts + 120 * MINU ? 'retrasado' : 'omitido';
+        out.push({ r, h:hr, ts, est, m });
+      });
+    });
+  }
+  return out.sort((a, b) => a.ts - b.ts);
+}
+function resultadosHtml() {
+  const t = dstr(), sem = misRondines(6), hoy = sem.filter(r => r.fecha === t);
+  const pct = a => a.length ? Math.round(a.reduce((s, r) => s + stats(r).pct, 0) / a.length) + '%' : '—';
+  const sum = (a, f) => a.reduce((s, r) => s + f(stats(r)), 0);
+  const tile = (l, v) => `<div class="rt"><div class="rtv">${v}</div><div class="rtl">${l}</div></div>`;
+  const last = [...sem].sort((a, b) => b.inicio - a.inicio)[0], inc = sem.filter(r => r.estado === 'incompleto').length;
+  return `<div class="card"><h2>Mis resultados</h2><p class="sm mu" style="margin:2px 0 10px">${esc(titulo(S.user.nombre))} · hoy</p>
+    <div class="rtg">${tile('Rondines', hoy.length)}${tile('Cumplimiento', pct(hoy))}${tile('Puntos escaneados', sum(hoy, s => s.done))}${tile('Hallazgos reportados', sum(hoy, s => s.hall))}</div>
+    <p class="sm mu" style="margin-top:12px">Últimos 7 días: <b>${sem.length}</b> rondines · <b>${pct(sem)}</b> de cumplimiento · <b>${sum(sem, s => s.hall)}</b> hallazgos${inc ? ` · ${inc} incompleto(s)` : ''}</p>
+    ${last ? `<p class="sm mu" style="margin-top:4px">Último: ${esc(last.rutaNombre)} · ${last.fecha === t ? 'hoy' : last.fecha} ${hhmm(last.inicio)} · ${stats(last).done}/${stats(last).total} puntos</p>` : ''}</div>`;
+}
+function turnoHtml() {
+  const ron = S.active, rutas = Object.values(S.rutas);
+  const rutaCard = (r, chip, sub, off) => `<div class="card rcard" style="border:2px solid var(--az)"><div class="row between"><h2>${esc(r.nombre)}</h2>${chip}</div><p class="mu sm" style="margin-top:4px">${sub}</p>
+    <button class="btn block" data-act="start" data-id="${r.id}" ${ron || off ? 'disabled' : ''}>Iniciar rondín</button></div>`;
+  if (!rutas.some(r => hors(r).length)) return `<h2 style="margin:16px 0 8px">Rutas</h2>${rutas.map(r => rutaCard(r, '', `${arr(r.puntos).length} puntos`, false)).join('')}`;
+  const sl = turnoSlots(), ya = sl.filter(x => x.est === 'ahora' || x.est === 'retrasado');
+  if (ya.length) return `<h2 style="margin:16px 0 8px">${ya.length > 1 ? 'Rondines que te tocan' : 'Rondín que te toca'}</h2>` +
+    ya.map(x => rutaCard(x.r, x.est === 'retrasado' ? '<span class="pill i">Retrasado</span>' : '<span class="chip now">Toca ahora</span>', `Horario ${x.h} · ${arr(x.r.puntos).length} puntos · ${x.r.durMin}–${x.r.durMax} min`, false)).join('');
+  const hecho = sl.filter(x => x.est === 'hecho' && Date.now() - x.ts < 4 * 60 * MINU).slice(-1)[0], prox = sl.find(x => x.est === 'proximo');
+  return `<div class="card" style="margin-top:16px">${hecho ? `<div class="okline">✓ Ya hiciste el rondín de las ${hecho.h} (${esc(hecho.r.nombre)})</div>` : ''}
+    ${prox ? `<h2>Siguiente rondín</h2><p class="mu sm" style="margin-top:4px">${esc(prox.r.nombre)} · ${prox.h} · ${arr(prox.r.puntos).length} puntos</p><p class="sm" style="margin-top:8px">Se habilita a las <b>${hhmm(prox.ts - 30 * MINU)}</b> (en ${falta(prox.ts - 30 * MINU - Date.now())}).</p>` : '<h2>Sin rondines pendientes</h2><p class="mu sm" style="margin-top:4px">No hay más rondines programados por ahora.</p>'}</div>`;
+}
+async function loadMine() {
+  const t = dstr(); try { await loadRange(addDays(t, -6), t, true); } catch (e) {}
+  if (S.view !== 'home') return;
+  const r = $('#resBox'), b = $('#turnoBox'); if (r) r.innerHTML = resultadosHtml(); if (b) b.innerHTML = turnoHtml();
+}
 function vHome() {
-  const rs = Object.values(S.rutas).sort((a, b) => (tocaAhora(b) - tocaAhora(a)) || a.nombre.localeCompare(b.nombre));
-  const sup = S.user.rol === 'supervisor';
-  const ron = S.active;
-  return `${topBar('Hola, ' + S.user.nombre.split(' ')[0], `${sup ? '<button class="btn sec" data-act="toSup">Supervisión</button>' : ''}<button class="btn sec" data-act="hist">Historial</button>${DB.mode === 'firebase' ? '<button class="btn sec" data-act="miPin">Mi PIN</button>' : ''}<button class="btn sec" data-act="logout">Salir</button>`)}
-  <div class="wrap">
-    ${S.pending ? `<div class="banner">Escaneaste «${esc((S.puntos[S.pending.pid] || {}).nombre || S.pending.pid)}». Inicia un rondín para registrarlo.</div>` : ''}
-    ${ron ? `<div class="card rcard" style="border:2px solid var(--az)"><h2>Rondín en curso</h2><p class="mu sm">${esc(ron.rutaNombre)} · inició ${hhmm(ron.inicio)}</p><button class="btn block" data-act="resume">Continuar rondín</button></div><div style="height:12px"></div>` : ''}
-    <h2 style="margin:4px 0 8px">Rutas</h2>
-    ${rs.map(r => `<div class="card rcard"><h2>${esc(r.nombre)}</h2>
-      <div>${tocaAhora(r) ? '<span class="chip now">Toca ahora</span>' : ''}${hors(r).map(h => `<span class="chip">${h}</span>`).join('')}</div>
-      <p class="mu sm" style="margin-top:6px">${arr(r.puntos).length} puntos · ${r.durMin}–${r.durMax} min · ${diasOf(r).length === 7 ? 'Todos los días' : diasOf(r).map(d => DIAS[d]).join(', ')}</p>
-      <button class="btn block ${tocaAhora(r) ? '' : 'sec'}" data-act="start" data-id="${r.id}" ${ron ? 'disabled' : ''}>Iniciar rondín</button></div>`).join('')}
-  </div>`;
+  const sup = S.user.rol === 'supervisor', ron = S.active;
+  const botones = `${sup ? '<button class="btn sec" data-act="toSup">Supervisión</button>' : ''}<button class="btn sec" data-act="hist">Historial</button>${DB.mode === 'firebase' ? '<button class="btn sec" data-act="miPin">Mi PIN</button>' : ''}<button class="btn sec" data-act="logout">Salir</button>`;
+  const pend = S.pending ? `<div class="banner">Escaneaste «${esc((S.puntos[S.pending.pid] || {}).nombre || S.pending.pid)}». Inicia un rondín para registrarlo.</div>` : '';
+  const curso = ron ? `<div class="card rcard" style="border:2px solid var(--az);margin-bottom:12px"><h2>Rondín en curso</h2><p class="mu sm">${esc(ron.rutaNombre)} · inició ${hhmm(ron.inicio)}</p><button class="btn block" data-act="resume">Continuar rondín</button></div>` : '';
+  const plano = '<button class="btn sec block" data-act="consOpen" style="margin-top:14px">Ver el plano de la planta</button>';
+  if (sup) {
+    const rs = Object.values(S.rutas).sort((a, b) => (tocaAhora(b) - tocaAhora(a)) || a.nombre.localeCompare(b.nombre));
+    return `${topBar('Hola, ' + S.user.nombre.split(' ')[0], botones)}<div class="wrap">${pend}${curso}
+      <h2 style="margin:4px 0 8px">Rutas</h2>
+      ${rs.map(r => `<div class="card rcard"><h2>${esc(r.nombre)}</h2>
+        <div>${tocaAhora(r) ? '<span class="chip now">Toca ahora</span>' : ''}${hors(r).map(hr => `<span class="chip">${hr}</span>`).join('')}</div>
+        <p class="mu sm" style="margin-top:6px">${arr(r.puntos).length} puntos · ${r.durMin}–${r.durMax} min · ${diasOf(r).length === 7 ? 'Todos los días' : diasOf(r).map(d => DIAS[d]).join(', ')}</p>
+        <button class="btn block ${tocaAhora(r) ? '' : 'sec'}" data-act="start" data-id="${r.id}" ${ron ? 'disabled' : ''}>Iniciar rondín</button></div>`).join('')}${plano}</div>`;
+  }
+  return `${topBar('Inicio', botones)}<div class="wrap">${pend}${curso}<div id="resBox">${resultadosHtml()}</div><div id="turnoBox">${turnoHtml()}</div>${plano}</div>`;
 }
 function sheetHtml(inline) {
   const s = S.sheet; if (!s || !S.active) return '';
@@ -680,6 +798,7 @@ function vRound() {
       ${NFC && !S.nfcOn ? '<button class="btn sec block" data-act="nfc">Activar lector NFC</button>' : ''}
       <button class="btn sec block" data-act="qrOpen" style="margin-top:8px">Escanear QR con la cámara</button>
       <button class="btn sec block" data-act="gmap" style="margin-top:8px">Ver mapa del recorrido</button>
+      <button class="btn sec block" data-act="consOpen" style="margin-top:8px">Consultar el plano de la planta</button>
       <div class="tl" style="margin-top:14px">
         ${esp.map(p => { const l = L[p]; return stop(p, l ? (l.estado === 'hallazgo' ? 'done hall' : 'done') : (p === next ? 'pend nx' : 'pend'), l ? (l.estado === 'hallazgo' ? '!' : '✓') : '', l, !l); }).join('')}
         ${extra.map(p => stop(p, 'done', '✓', L[p], false)).join('')}
@@ -855,8 +974,18 @@ function vSup() {
    La imagen vive en LAYOUT_IMG (archivo aparte, junto a esta página);
    si no se encuentra, se muestran solo los contornos de las áreas.
    ===================================================================== */
-const LAYOUT_IMG = 'layout_planta.webp';
-const BOX = { x:50, y:137.7, w:744.6, h:328.3 }, HOME = { x:44, y:140, w:752, h:322 };
+const BOX = { x:54.9, y:135.1, w:739.1, h:327.8 }, HOME = { x:BOX.x - 6, y:BOX.y - 6, w:BOX.w + 12, h:BOX.h + 12 };
+/* Dos versiones del mismo plano (Layout de planta rev. 03): oscuro (por defecto) y claro. Se eligen con el botón ◐ del mapa. */
+const TEMAS = {
+  claro:{ img:'layout_planta_claro.webp', ring:'#227EF6', trace:'#227EF6', pend:'#64748b', pin:'#227EF6', pinSel:'#0D18A8', area:{ fill:'rgba(34,126,246,.07)', stroke:'#227EF6' },
+    mst:{ ok:{ r:11, f:'#0D18A8', s:'#fff', sw:2, t:'#fff' }, hall:{ r:11, f:'#991b1b', s:'#fff', sw:2, t:'#fff' }, pend:{ r:10, f:'#fff', s:'#64748b', sw:2, t:'#475569' },
+      next:{ r:12, f:'#fff', s:'#227EF6', sw:3, t:'#0D18A8' }, dot:{ r:4.5, f:'#cbd5e1', s:'#fff', sw:1, t:'' }, cnt:{ r:12, f:'rgba(153,27,27,.85)', s:'#fff', sw:2, t:'#fff' },
+      pl:{ r:9, f:'#fff', s:'#0D18A8', sw:2, t:'#0D18A8' }, plsel:{ r:12, f:'#227EF6', s:'#fff', sw:2, t:'#fff' } } },
+  oscuro:{ img:'layout_planta_oscuro.webp', ring:'#60a5fa', trace:'#60a5fa', pend:'#94a3b8', pin:'#60a5fa', pinSel:'#2563eb', area:{ fill:'rgba(96,165,250,.08)', stroke:'#60a5fa' },
+    mst:{ ok:{ r:11, f:'#3b82f6', s:'#e6edf7', sw:2, t:'#fff' }, hall:{ r:11, f:'#ef4444', s:'#fff', sw:2, t:'#fff' }, pend:{ r:10, f:'#0b1220', s:'#94a3b8', sw:2, t:'#cbd5e1' },
+      next:{ r:12, f:'#0b1220', s:'#60a5fa', sw:3, t:'#93c5fd' }, dot:{ r:4.5, f:'#64748b', s:'#0b1220', sw:1, t:'' }, cnt:{ r:12, f:'rgba(239,68,68,.88)', s:'#fff', sw:2, t:'#fff' },
+      pl:{ r:9, f:'#0b1220', s:'#60a5fa', sw:2, t:'#93c5fd' }, plsel:{ r:12, f:'#3b82f6', s:'#fff', sw:2, t:'#fff' } } } };
+const TH = () => TEMAS[S.mapTheme === 'claro' ? 'claro' : 'oscuro'];
 const homeBox = { x0:HOME.x, y0:HOME.y, x1:HOME.x + HOME.w, y1:HOME.y + HOME.h };
 const AREAS = [["imp11","Impresora 11",[[68,158],[124,160],[120,181],[67,181]]],["imp10","Impresora 10",[[67,181],[120,182],[119,192],[66,191]]],["imp8","Impresora 8",[[66,192],[119,192],[116,215],[65,214]]],["imp9","Impresora 9",[[65,215],[116,215],[112,241],[63,240]]],["imp4","Impresora 4 (6 tintas)",[[243,181],[258,181],[258,213],[243,213]]],["imp5","Impresora 5",[[259,181],[276,181],[276,213],[259,213]]],["ext5","Extrusora 5",[[323,168],[368,168],[368,187],[323,187]]],["extA","Extrusora por numerar (A)",[[275,195],[298,195],[298,233],[275,233]]],["ext3","Extrusora 3",[[308,196],[326,196],[326,234],[308,234]]],["ext6","Extrusora 6",[[327,196],[339,196],[339,234],[327,234]]],["extB","Extrusora por numerar (B)",[[341,196],[360,196],[360,234],[341,234]]],["ext1","Extrusora 1",[[361,192],[375,192],[375,224],[361,224]]],["bolseo","Bolseo",[[151,164],[198,164],[196,206],[151,205]]],["bols7","Bolseadora 7",[[160,210],[184,210],[183,221],[160,220]]],["corr1","Corrugadora 1",[[60,253],[101,256],[99,275],[60,274]]],["corr2","Corrugadora 2",[[60,274],[99,275],[97,295],[60,294]]],["corr3","Corrugadora 3",[[60,294],[97,295],[95,314],[60,312]]],["tmto","Taller de mantenimiento",[[58,314],[94,316],[92,338],[58,338]]],["tsold","Taller de soldadura",[[575,169],[610,170],[610,213],[576,213]]],["tmp","Taller de mantenimiento preventivo",[[604,214],[637,216],[636,229],[604,228]]],["tproy","Taller de proyectos",[[608,168],[638,170],[637,212],[607,211]]],["sgen","Servicios generales",[[575,214],[593,214],[593,224],[576,224]]],["apt","Almacén PT",[[151,222],[184,222],[182,256],[150,254]]],["aproc","Almacén de producto en proceso y bobinas",[[277,168],[313,168],[313,193],[277,193]]],["mp","Materia prima",[[121,258],[139,258],[137,314],[120,314]]],["nc","Material no conforme",[[123,314],[138,314],[137,328],[122,327]]],["refac","Almacén de refacciones",[[98,357],[117,357],[113,392],[96,390]]],["tintas","Área de tintas",[[93,395],[111,396],[109,412],[92,411]]],["rph","Residuos peligrosos",[[91,412],[108,413],[104,426],[91,424]]],["cdim","Control dimensional",[[72,338],[91,339],[86,383],[70,381]]],["mejora","Mejora continua",[[105,341],[119,342],[118,356],[104,355]]],["adm","Administración y dirección",[[180,293],[206,296],[204,333],[180,332]]],["compras","Compras",[[157,350],[177,350],[177,361],[157,361]]],["sjuntas","Sala de juntas",[[138,161],[148,161],[148,179],[138,179]]],["comedor","Comedor",[[382,164],[410,164],[410,181],[382,181]]],["rh","Recursos Humanos",[[420,159],[464,159],[464,177],[420,177]]],["lockers","Área de lockers",[[464,159],[490,159],[490,175],[464,175]]],["cochera","Cochera",[[500,159],[524,159],[524,174],[500,174]]],["comp","Compresores y área de salida",[[385,220],[404,222],[404,232],[385,231]]],["aduana","Aduana (200)",[[72,386],[84,386],[84,398],[72,398]]],["tanque","Tanque de gas",[[60,401],[74,401],[74,423],[60,423]]],["recic","Recicladora de solventes",[[61,427],[73,427],[73,442],[61,442]]],["est303","Estacionamiento 303",[[421,180],[507,180],[505,208],[430,222]]],["est373","Estacionamiento 373",[[678,172],[781,170],[784,246],[680,236]]]].map(a => { const xs = a[2].map(p => p[0]), ys = a[2].map(p => p[1]); const bb = { x:Math.min(...xs), y:Math.min(...ys), w:Math.max(...xs) - Math.min(...xs), h:Math.max(...ys) - Math.min(...ys) }; return { id:a[0], nombre:a[1], pts:a[2], bb, c:[bb.x + bb.w / 2, bb.y + bb.h / 2] }; });
 /* Posiciones iniciales aproximadas (centro del área del plano que corresponde al punto). Se ajustan en Monitor → Ubicar puntos. */
@@ -869,7 +998,8 @@ const placed = pid => { const p = S.puntos[pid]; return p && p.pos && isFinite(p
 const scansOf = r => Object.entries(r.lecturas || {}).sort((a, b) => a[1].ts - b[1].ts);
 const hace = ms => { const m = Math.round(ms / 6e4); return m < 1 ? 'hace un momento' : `hace ${m} min`; };
 const pillCls = e => e === 'completo' ? 'c' : e === 'incompleto' ? 'i' : 'e';
-const legendHtml = () => `<span class="lg"><i class="lgd" style="background:#0D18A8"></i>Escaneado</span><span class="lg"><i class="lgd" style="background:#991b1b"></i>Hallazgo</span><span class="lg"><i class="lgd" style="background:#fff;border:2px solid #64748b"></i>Pendiente</span><span class="lg"><i class="lgd" style="background:#fff;border:3px solid #227EF6"></i>Siguiente</span><span class="lg"><i class="lgd" style="background:#fff;border:2px dashed #227EF6"></i>Fuera de secuencia</span><span class="lg"><i class="lgd" style="background:#cbd5e1"></i>Otros puntos</span>`;
+const legendHtml = () => { const m = TH().mst, d = (st, extra = '') => `<i class="lgd" style="background:${m[st].f};${extra}"></i>`;
+  return `<span class="lg">${d('ok')}Escaneado</span><span class="lg">${d('hall')}Hallazgo</span><span class="lg">${d('pend', `border:2px solid ${m.pend.s}`)}Pendiente</span><span class="lg">${d('next', `border:3px solid ${m.next.s}`)}Siguiente</span><span class="lg">${d('next', `border:2px dashed ${TH().ring}`)}Fuera de secuencia</span><span class="lg">${d('dot')}Otros puntos</span>`; };
 
 async function seedPos() {
   if (S.cfg.posSeeded) return;
@@ -882,41 +1012,51 @@ async function seedPos() {
 const pxPorUnidad = () => { const r = MAP.svg.getBoundingClientRect(); return Math.min(r.width / vb.w, r.height / vb.h) || 1; };
 function aplicar() { MAP.svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); S.mapVB = { ...vb }; escalar(); }
 function zoomEn(k, cx, cy) { const nw = Math.min(HOME.w * 1.2, Math.max(30, vb.w * k)), kk = nw / vb.w; vb = { x:cx - (cx - vb.x) * kk, y:cy - (cy - vb.y) * kk, w:vb.w * kk, h:vb.h * kk }; aplicar(); }
-function fitBox(b, pad = 1.35) {
+function fitBox(b, pad = 1.35, full = false, minW = 90) {
   const r = MAP.host.getBoundingClientRect(), asp = (r.width / r.height) || 2.3;
-  const w = Math.max((b.x1 - b.x0) * pad, (b.y1 - b.y0) * pad * asp, pad === 1 ? 0 : 90), h = w / asp;
+  const w = Math.max((b.x1 - b.x0) * pad, (b.y1 - b.y0) * pad * asp, full ? 0 : minW), h = w / asp;
   vb = { x:(b.x0 + b.x1) / 2 - w / 2, y:(b.y0 + b.y1) / 2 - h / 2, w, h };
-  if (pad === 1 && h < HOME.h) { const hh = HOME.h, ww = hh * asp; vb = { x:(b.x0 + b.x1) / 2 - ww / 2, y:(b.y0 + b.y1) / 2 - hh / 2, w:ww, h:hh }; }
+  if (full && h < HOME.h) { const hh = HOME.h, ww = hh * asp; vb = { x:(b.x0 + b.x1) / 2 - ww / 2, y:(b.y0 + b.y1) / 2 - hh / 2, w:ww, h:hh }; }
   aplicar();
 }
 function fitModel(m) {
   const ms = (m.marks || []).filter(x => x.st !== 'dot');
-  if (!ms.length) { fitBox(homeBox, 1); return; }
+  if (!ms.length) { fitBox(homeBox, 1, true); return; }
   fitBox({ x0:Math.min(...ms.map(x => x.x)), x1:Math.max(...ms.map(x => x.x)), y0:Math.min(...ms.map(x => x.y)), y1:Math.max(...ms.map(x => x.y)) });
 }
 function drawAreas() {
-  const g = MAP.gAreas; if (!g) return; g.innerHTML = ''; g.style.display = S.mon.areas ? '' : 'none';
+  const g = MAP.gAreas; if (!g) return; g.innerHTML = ''; g.style.display = MAP.areasOn ? '' : 'none';
+  const ta = TH().area;
   AREAS.forEach(a => {
-    const p = sv('polygon', { points:a.pts.map(q => q.join(',')).join(' '), fill:'rgba(34,126,246,.07)', stroke:'#227EF6', 'stroke-opacity':.55, 'stroke-width':1 }, g);
+    const p = sv('polygon', { points:a.pts.map(q => q.join(',')).join(' '), fill:ta.fill, stroke:ta.stroke, 'stroke-opacity':.7, 'stroke-width':1 }, g);
     p.style.vectorEffect = 'non-scaling-stroke'; sv('title', {}, p).textContent = a.nombre;
+    if (MAP.opts && MAP.opts.onArea) { p.style.cursor = 'pointer'; p.addEventListener('click', () => { if (!MAP.moved) MAP.opts.onArea(a); }); }
     a.et = sv('text', { class:'etq', x:a.c[0], y:a.c[1] }, g); a.et.textContent = a.nombre;
   });
   escalar();
 }
+function cambiarTema() {
+  S.mapTheme = S.mapTheme === 'claro' ? 'oscuro' : 'claro'; try { localStorage.setItem('rz_maptheme', S.mapTheme); } catch (e) {}
+  if (!MAP.host) return; const dk = S.mapTheme !== 'claro';
+  MAP.host.classList.toggle('dark', dk); const par = MAP.host.parentElement; if (par && par.classList.contains('gmo')) par.classList.toggle('dk', dk);
+  if (MAP.img) MAP.img.setAttribute('href', TH().img);
+  drawAreas(); if (MAP.redraw) MAP.redraw();
+}
 function mountMap(host, opts, init) {
   MAP.host = host; MAP.opts = opts; MAP.moved = false; MAP.styled = []; host.innerHTML = '';
+  MAP.areasOn = opts.areas !== undefined ? opts.areas : S.mon.areas; MAP.redraw = null; host.classList.toggle('dark', S.mapTheme !== 'claro');
   vb = init ? { ...init } : { ...HOME };
   const svg = sv('svg', { viewBox:`${vb.x} ${vb.y} ${vb.w} ${vb.h}`, role:'img', 'aria-label':'Plano de la planta Zubex' }, host); MAP.svg = svg;
-  const im = sv('image', { x:BOX.x, y:BOX.y, width:BOX.w, height:BOX.h, preserveAspectRatio:'none' }, sv('g', {}, svg)); im.setAttribute('href', LAYOUT_IMG);
+  const im = sv('image', { x:BOX.x, y:BOX.y, width:BOX.w, height:BOX.h, preserveAspectRatio:'none' }, sv('g', {}, svg)); im.setAttribute('href', TH().img); MAP.img = im;
   MAP.gAreas = sv('g', {}, svg); MAP.gTrace = sv('g', {}, svg); MAP.gMarks = sv('g', {}, svg); MAP.gPins = sv('g', {}, svg);
   const tip = document.createElement('div'); tip.className = 'mtip'; tip.hidden = true; host.appendChild(tip);
   MAP.tip = h => { if (!h) { tip.hidden = true; return; } tip.innerHTML = h; tip.hidden = false; };
-  const probe = new Image(); probe.onerror = () => { im.style.display = 'none'; S.mon.areas = true; drawAreas(); MAP.tip('No se encontró <b>' + LAYOUT_IMG + '</b> junto a esta página; se muestran solo las áreas.'); }; probe.src = LAYOUT_IMG;
+  const probe = new Image(); probe.onerror = () => { im.style.display = 'none'; MAP.areasOn = true; drawAreas(); MAP.tip('No se encontró <b>' + TH().img + '</b> junto a esta página; se muestran solo las áreas.'); }; probe.src = TH().img;
   drawAreas();
   const z = document.createElement('div'); z.className = 'mz';
-  z.innerHTML = '<button class="btn" data-z="in" aria-label="Acercar">+</button><button class="btn" data-z="out" aria-label="Alejar">−</button><button class="btn" data-z="home" aria-label="Ver toda la planta" style="font-size:12px">Todo</button>';
+  z.innerHTML = '<button class="btn" data-z="in" aria-label="Acercar">+</button><button class="btn" data-z="out" aria-label="Alejar">−</button><button class="btn" data-z="home" aria-label="Ver toda la planta" style="font-size:12px">Todo</button><button class="btn" data-z="theme" aria-label="Cambiar entre plano claro y oscuro" style="font-size:18px">◐</button>';
   host.appendChild(z);
-  z.addEventListener('click', e => { const b = e.target.closest('[data-z]'); if (!b) return; const c = [vb.x + vb.w / 2, vb.y + vb.h / 2]; if (b.dataset.z === 'in') zoomEn(.7, c[0], c[1]); else if (b.dataset.z === 'out') zoomEn(1.4, c[0], c[1]); else fitBox(homeBox, 1); });
+  z.addEventListener('click', e => { const b = e.target.closest('[data-z]'); if (!b) return; const c = [vb.x + vb.w / 2, vb.y + vb.h / 2]; if (b.dataset.z === 'in') zoomEn(.7, c[0], c[1]); else if (b.dataset.z === 'out') zoomEn(1.4, c[0], c[1]); else if (b.dataset.z === 'theme') cambiarTema(); else fitBox(homeBox, 1, true); });
   const aPunto = ev => { const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; return pt.matrixTransform(svg.getScreenCTM().inverse()); };
   svg.addEventListener('wheel', e => { e.preventDefault(); const p = aPunto(e); zoomEn(e.deltaY < 0 ? .85 : 1.18, p.x, p.y); }, { passive:false });
   const ptrs = new Map(); let ult = null, dist0 = 0;
@@ -934,8 +1074,8 @@ function mountMap(host, opts, init) {
   svg.addEventListener('click', e => { if (MAP.moved || e.target.closest('.mk')) return; const p = aPunto(e); if (MAP.opts.onClick) MAP.opts.onClick(p.x, p.y); });
 }
 function escalar() {
-  if (!MAP.svg) return; const s = pxPorUnidad(), k = 1 / s;
-  MAP.gMarks.querySelectorAll('.mk').forEach(g => { g.setAttribute('transform', `translate(${g._x} ${g._y}) scale(${k})`); const mn = g.querySelector('.mn'); if (mn) mn.style.display = (g._show || s >= 3.4) ? '' : 'none'; });
+  if (!MAP.svg) return; const s = pxPorUnidad(), k = 1 / s, km = k * (s < 1.6 ? .6 : 1);
+  MAP.gMarks.querySelectorAll('.mk').forEach(g => { g.setAttribute('transform', `translate(${g._x} ${g._y}) scale(${km})`); const mn = g.querySelector('.mn'); if (mn) mn.style.display = (g._show || s >= 3.4) ? '' : 'none'; });
   MAP.gPins.querySelectorAll('.pin').forEach(g => g.setAttribute('transform', `translate(${g._x} ${g._y}) scale(${k})`));
   MAP.styled.forEach(([e, w, d]) => { e.setAttribute('stroke-width', w * k); if (d) e.setAttribute('stroke-dasharray', `${d * k} ${d * .8 * k}`); });
   const fs = 11 * k;
@@ -943,14 +1083,11 @@ function escalar() {
 }
 
 /* ---------- Dibujo de marcadores, recorrido y vigilantes ---------- */
-const MST = { ok:{ r:11, f:'#0D18A8', s:'#fff', sw:2, t:'#fff' }, hall:{ r:11, f:'#991b1b', s:'#fff', sw:2, t:'#fff' }, pend:{ r:10, f:'#fff', s:'#64748b', sw:2, t:'#475569' },
-  next:{ r:12, f:'#fff', s:'#227EF6', sw:3, t:'#0D18A8' }, dot:{ r:4.5, f:'#cbd5e1', s:'#fff', sw:1, t:'' }, cnt:{ r:12, f:'rgba(153,27,27,.85)', s:'#fff', sw:2, t:'#fff' },
-  pl:{ r:9, f:'#fff', s:'#0D18A8', sw:2, t:'#0D18A8' }, plsel:{ r:12, f:'#227EF6', s:'#fff', sw:2, t:'#fff' } };
 function drawMark(m) {
-  const st = MST[m.st], g = sv('g', { class:'mk' }, MAP.gMarks); g._x = m.x; g._y = m.y; g._show = !!m.show; g.dataset.pid = m.pid;
+  const st = TH().mst[m.st], g = sv('g', { class:'mk' }, MAP.gMarks); g._x = m.x; g._y = m.y; g._show = !!m.show; g.dataset.pid = m.pid;
   const r = m.st === 'cnt' ? Math.min(24, 10 + m.c * 2.5) : st.r;
-  if (m.st === 'next') sv('circle', { class:'pul', r:12, fill:'none', stroke:'#227EF6', 'stroke-width':2 }, g);
-  const c = sv('circle', { r, fill:st.f, stroke:m.fuera ? '#227EF6' : st.s, 'stroke-width':st.sw }, g); if (m.fuera) c.setAttribute('stroke-dasharray', '3 2');
+  if (m.st === 'next') sv('circle', { class:'pul', r:12, fill:'none', stroke:TH().ring, 'stroke-width':2 }, g);
+  const c = sv('circle', { r, fill:st.f, stroke:m.fuera ? TH().ring : st.s, 'stroke-width':st.sw }, g); if (m.fuera) c.setAttribute('stroke-dasharray', '3 2');
   if (st.t && m.n != null) { const t = sv('text', { class:'mtx', 'font-size':m.st === 'hall' ? 13 : 10, fill:st.t }, g); t.textContent = m.st === 'hall' ? '!' : m.n; }
   sv('title', {}, g).textContent = m.title || m.pid;
   const mn = sv('text', { class:'mn', y:r + 14, 'font-size':11 }, g); mn.textContent = m.label || '';
@@ -958,7 +1095,7 @@ function drawMark(m) {
 }
 function drawPin(p) {
   const g = sv('g', { class:'pin' }, MAP.gPins); g._x = p.x; g._y = p.y;
-  sv('path', { d:'M0,0 C-6,-9 -11,-14 -11,-21 A11,11 0 1 1 11,-21 C11,-14 6,-9 0,0Z', fill:p.sel ? '#0D18A8' : '#227EF6', stroke:'#fff', 'stroke-width':1.5 }, g);
+  sv('path', { d:'M0,0 C-6,-9 -11,-14 -11,-21 A11,11 0 1 1 11,-21 C11,-14 6,-9 0,0Z', fill:p.sel ? TH().pinSel : TH().pin, stroke:'#fff', 'stroke-width':1.5 }, g);
   sv('circle', { cx:0, cy:-21, r:4, fill:'#fff' }, g);
   const t = sv('text', { class:'mn', y:-38, 'font-size':11 }, g); t.textContent = p.label;
   sv('title', {}, g).textContent = p.title || p.label;
@@ -966,8 +1103,8 @@ function drawPin(p) {
 function drawModel(m) {
   MAP.gMarks.innerHTML = ''; MAP.gTrace.innerHTML = ''; MAP.gPins.innerHTML = ''; MAP.styled = [];
   const line = (pts, color, w, dash, op) => { const p = sv('path', { d:'M' + pts.map(q => q.join(',')).join(' L'), fill:'none', stroke:color, 'stroke-linecap':'round', 'stroke-linejoin':'round', 'stroke-opacity':op || 1 }, MAP.gTrace); MAP.styled.push([p, w, dash]); };
-  if (m.pend && m.pend.length > 1) line(m.pend, '#64748b', 2, 6);
-  if (m.trace && m.trace.length > 1) { line(m.trace, '#227EF6', 9, 0, .22); line(m.trace, '#227EF6', 3, 0); }
+  if (m.pend && m.pend.length > 1) line(m.pend, TH().pend, 2, 6);
+  if (m.trace && m.trace.length > 1) { line(m.trace, TH().trace, 9, 0, .22); line(m.trace, TH().trace, 3, 0); }
   (m.marks || []).forEach(drawMark); (m.pins || []).forEach(drawPin); escalar();
 }
 
@@ -1097,7 +1234,7 @@ function refreshMonitor() {
   if (S.view !== 'sup' || S.tab !== 'monitor' || !MAP.svg || !$('#mapHost')) return;
   const M = S.mon, ron = currentRon(), model = buildModel(ron, { mode:M.mode, upto:M.upto });
   drawModel(model); const fid = ron ? ron.id : null;
-  if (M.fit || (M.mode === 'vivo' && M.fitId !== fid)) { if (M.mode === 'vivo') fitModel(model); else fitBox(homeBox, 1); M.fit = false; M.fitId = fid; }
+  if (M.fit || (M.mode === 'vivo' && M.fitId !== fid)) { if (M.mode === 'vivo') fitModel(model); else fitBox(homeBox, 1, true); M.fit = false; M.fitId = fid; }
   if (M.mode === 'vivo') $('#monBody').innerHTML = monVivo();
   $('#monLeg').innerHTML = M.mode === 'periodo' ? '<span class="lg"><i class="lgd" style="background:rgba(153,27,27,.85)"></i>Hallazgos del periodo (más grande = más hallazgos)</span>' : M.mode === 'ubicar' ? '<span class="lg"><i class="lgd" style="background:#227EF6"></i>Punto elegido</span><span class="lg"><i class="lgd" style="background:#fff;border:2px solid #0D18A8"></i>Ya ubicado</span>' : legendHtml() + '<span class="lg"><svg width="10" height="14" viewBox="-11 -34 22 34"><path d="M0,0 C-6,-9 -11,-14 -11,-21 A11,11 0 1 1 11,-21 C11,-14 6,-9 0,0Z" fill="#227EF6"/></svg>Vigilante</span>';
   updateReplay(ron);
@@ -1106,7 +1243,7 @@ function mountMonitor() {
   const host = $('#mapHost'); if (!host) return;
   if (!S.mapVB) S.mon.fit = true;
   mountMap(host, { onPoint:monPoint, onClick:monClick }, S.mapVB);
-  refreshMonitor();
+  MAP.redraw = refreshMonitor; refreshMonitor();
 }
 function monPoint(pid) {
   const M = S.mon;
@@ -1133,13 +1270,13 @@ function stopWatch() { if (S.unwatch) { S.unwatch(); S.unwatch = null; } clearIn
 
 /* ---------- Mapa del vigilante (durante el rondín) ---------- */
 function gmapHtml() {
-  return `<div class="gmo"><div class="gmh"><b>${esc(S.active.rutaNombre)}</b><button class="btn sm sec" data-act="gmapClose" style="flex:none;background:transparent;color:#fff;border-color:rgba(255,255,255,.7)">Cerrar</button></div><div id="gmHost" class="maphost"></div><div class="gmf" id="gmNote"></div></div>`;
+  return `<div class="gmo ${S.mapTheme !== 'claro' ? 'dk' : ''}"><div class="gmh"><b>${esc(S.active.rutaNombre)}</b><button class="btn sm sec" data-act="gmapClose" style="flex:none;background:transparent;color:#fff;border-color:rgba(255,255,255,.7)">Cerrar</button></div><div id="gmHost" class="maphost"></div><div class="gmf" id="gmNote"></div></div>`;
 }
 function mountGuardMap() {
   const host = $('#gmHost'); if (!host || !S.active) return;
   mountMap(host, { onPoint:pid => MAP.tip(pointTip(pid, S.active)) }, null);
-  const m = buildModel(S.active, { mode:'vivo', solo:true }); drawModel(m); fitModel(m);
-  $('#gmNote').innerHTML = legendHtml() + (m.unp.length ? `<div style="margin-top:6px">${m.unp.length} punto(s) de esta ruta aún no tienen ubicación en el plano.</div>` : '');
+  const pintar = () => { const m = buildModel(S.active, { mode:'vivo', solo:true }); drawModel(m); $('#gmNote').innerHTML = legendHtml() + (m.unp.length ? `<div style="margin-top:6px">${m.unp.length} punto(s) de esta ruta aún no tienen ubicación en el plano.</div>` : ''); return m; };
+  fitModel(pintar()); MAP.redraw = pintar;
 }
 
 /* ---------- Lectura de QR con la cámara ---------- */
@@ -1293,6 +1430,7 @@ function render() {
     if (fs) fs.addEventListener('submit', e => { e.preventDefault(); doSetup(); });
   }
 }
+setInterval(() => { if (S.view === 'home' && S.user && S.user.rol !== 'supervisor' && !$('#modal') && !$('#consRoot')) { const b = $('#turnoBox'); if (b) b.innerHTML = turnoHtml(); } }, 60000);
 setInterval(() => { const c = $('#crono'); if (c && S.active) c.textContent = dur(Date.now() - S.active.inicio); }, 1000);
 
 /* ---------- Acciones (delegación de eventos) ---------- */
@@ -1317,7 +1455,7 @@ const ACT = {
   },
   verRondin() { clearTimeout(S.tm); S.sheet = null; S.view = 'round'; render(); },
   sinRegistrar() { S.pending = null; S.view = S.active ? 'round' : 'home'; render(); },
-  goHome() { S.view = S.active ? 'round' : 'home'; render(); },
+  goHome() { S.view = S.active ? 'round' : 'home'; render(); if (S.view === 'home' && S.user.rol !== 'supervisor') loadMine(); },
   toSup() { supLoad(); }, toGuard() { S.view = S.active ? 'round' : 'home'; render(); },
   closeModal() { closeModal(); },
   async hist() {
@@ -1373,6 +1511,11 @@ const ACT = {
       catch (e) { toast(authErr(e), 'bad'); }
     };
   },
+  consOpen() { showCons(); },
+  consClose() { closeCons(); },
+  consAreas(t) { S.cons.areas = !S.cons.areas; t.classList.toggle('on', S.cons.areas); MAP.areasOn = S.cons.areas; drawAreas(); },
+  consPuntos(t) { S.cons.puntos = !S.cons.puntos; t.classList.toggle('on', S.cons.puntos); drawCons(); },
+  consPick(t) { consPick(t.dataset.k); const b = $('#consr'); if (b) b.hidden = true; const i = $('#consq'); if (i) i.blur(); },
   /* plano y monitor */
   gmap() { S.gmap = true; render(); },
   gmapClose() { S.gmap = false; render(); },
@@ -1382,7 +1525,7 @@ const ACT = {
     if (S.mon.mode === 'periodo') { try { await loadRange(S.f.desde, S.f.hasta); } catch (e) {} }
     render();
   },
-  monAreas(t) { S.mon.areas = !S.mon.areas; t.textContent = (S.mon.areas ? 'Ocultar' : 'Mostrar') + ' áreas'; drawAreas(); },
+  monAreas(t) { S.mon.areas = !S.mon.areas; MAP.areasOn = S.mon.areas; t.textContent = (S.mon.areas ? 'Ocultar' : 'Mostrar') + ' áreas'; drawAreas(); },
   monPl(t) { S.mon.place = t.dataset.id; $('#monBody').innerHTML = monUbicar(); refreshMonitor(); },
   async monQuitar() {
     const id = S.mon.place; if (!id || !S.puntos[id].pos) { toast('Ese punto no tiene ubicación'); return; }
@@ -1522,6 +1665,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.ma
 
 /* ---------- Inicio ---------- */
 (async function init() {
+  try { S.mapTheme = localStorage.getItem('rz_maptheme') === 'claro' ? 'claro' : 'oscuro'; } catch (e) {}
   const q = new URLSearchParams(location.search);
   if (q.get('punto')) { S.pending = { pid:q.get('punto'), k:q.get('k') || '' }; history.replaceState(null, '', location.pathname); }
   render();
